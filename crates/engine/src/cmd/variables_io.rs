@@ -187,18 +187,51 @@ fn uno_theme(doc: &Document, colls: &[&Collection]) -> String {
                 summary = format!("{summary}: {}", xml_summary(&v.description));
             }
             let name = &key.name;
+            let key_decl = |ty: &str| {
+                format!("    /// <summary>{summary}</summary>\n    public static readonly ThemeResourceKey<{ty}> {name} = new({});", cs_literal(name))
+            };
+            // A value that is the same in both themes goes in the main dictionary, once.
+            let mut entry = |ty: &str, a: String, b: String| {
+                decls.push(key_decl(ty));
+                if a == b {
+                    main.push(format!("        dict[{name}.Key] = {a};"));
+                } else {
+                    light.push(format!("            [{name}.Key] = {a},"));
+                    dark.push(format!("            [{name}.Key] = {b},"));
+                }
+            };
             match (key.kind, lv, dv) {
                 (figcraft_doc::VariableType::Color, Some(VariableValue::Color(a)), Some(VariableValue::Color(b))) => {
-                    decls.push(format!(
-                        "    /// <summary>{summary}</summary>\n    public static readonly ThemeResourceKey<Brush> {name} = new({});",
-                        cs_literal(name)
-                    ));
                     let brush = |c| format!("new SolidColorBrush({})", cs_color(c));
-                    if cs_color(a) == cs_color(b) {
-                        main.push(format!("        dict[{name}.Key] = {};", brush(a)));
+                    entry("Brush", brush(a), brush(b));
+                }
+                // A number the same in every exported mode is a constant, which goes anywhere a number
+                // does (`.Spacing(AppTheme.Space8)`); one that differs is a resource per theme.
+                (figcraft_doc::VariableType::Number, Some(VariableValue::Number(a)), Some(VariableValue::Number(b))) => {
+                    if !a.is_finite() || !b.is_finite() {
+                        notes.push(format!("{} is not a finite number and is left out", xml_summary(&v.name)));
+                    } else if a == b {
+                        decls.push(format!("    /// <summary>{summary}</summary>\n    public const double {name} = {};", dart_number(a)));
                     } else {
-                        light.push(format!("            [{name}.Key] = {},", brush(a)));
-                        dark.push(format!("            [{name}.Key] = {},", brush(b)));
+                        entry("double", format!("{}D", dart_number(a)), format!("{}D", dart_number(b)));
+                    }
+                }
+                (figcraft_doc::VariableType::String, Some(VariableValue::String(a)), Some(VariableValue::String(b))) => {
+                    if v.scopes.as_deref().is_some_and(|sc| sc.len() == 1 && sc.iter().all(|x| x == "FONT_FAMILY")) {
+                        let family = |t: &str| format!("new FontFamily({})", cs_literal(t));
+                        entry("FontFamily", family(&a), family(&b));
+                    } else {
+                        entry("string", cs_literal(&a), cs_literal(&b));
+                    }
+                }
+                (figcraft_doc::VariableType::Boolean, Some(VariableValue::Boolean(a)), Some(VariableValue::Boolean(b))) => {
+                    if a == b {
+                        decls.push(format!("    /// <summary>{summary}</summary>\n    public const bool {name} = {a};"));
+                    } else {
+                        notes.push(format!(
+                            "{} differs by mode and is left out (a boolean is written only when it is the same in every mode)",
+                            xml_summary(&v.name)
+                        ));
                     }
                 }
                 _ => {}

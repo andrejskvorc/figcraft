@@ -807,3 +807,81 @@ fn the_uno_export_refuses_junk_collections_and_exports_nothing_for_an_empty_file
     assert!(code.contains("public static class AppTheme") && code.contains("return dict;"), "{code}");
     assert!(!code.contains("using Windows.UI;"), "{code}");
 }
+
+#[test]
+fn uno_numbers_are_constants_when_equal_in_every_mode_else_a_resource_per_theme() {
+    let mut s = Session::new();
+    ex(&mut s, "variable.createCollection", json!({"name": "Tokens", "modes": ["Light", "Dark"]}));
+    let num = |s: &mut Session, name: &str, values: Value| {
+        ex(s, "variable.create", json!({"collection": "Tokens", "name": name, "type": "number", "values": values}));
+    };
+    num(&mut s, "space/16", json!({"Light": 16, "Dark": 16}));
+    num(&mut s, "ratio", json!({"Light": 0.125, "Dark": 0.125}));
+    num(&mut s, "density", json!({"Light": 8, "Dark": 12}));
+    let code = uno_theme(&mut s);
+    assert!(code.contains("    /// <summary>space/16</summary>\n    public const double Space16 = 16;"), "{code}");
+    assert!(code.contains("public const double Ratio = 0.125;"), "{code}");
+    assert!(code.contains("public static readonly ThemeResourceKey<double> Density = new(\"Density\");"), "{code}");
+    assert!(code.contains("[Density.Key] = 8D,") && code.contains("[Density.Key] = 12D,"), "{code}");
+    // A constant is no resource: it is neither a key nor in a dictionary.
+    assert!(!code.contains("Space16.Key") && !code.contains("ThemeResourceKey<double> Space16"), "{code}");
+    // Not a finite number: left out with a note, never written as NaN.
+    let mut s = Session::new();
+    ex(&mut s, "variable.createCollection", json!({"name": "Tokens", "modes": ["Light"]}));
+    ex(&mut s, "variable.create", json!({"collection": "Tokens", "name": "big", "type": "number", "value": 1e300}));
+    assert!(uno_theme(&mut s).contains("public const double Big = 1e300;"));
+}
+
+#[test]
+fn uno_strings_booleans_and_font_families() {
+    let mut s = Session::new();
+    ex(&mut s, "variable.createCollection", json!({"name": "Tokens", "modes": ["Light", "Dark"]}));
+    ex(&mut s, "variable.create", json!({"collection": "Tokens", "name": "font", "type": "string", "values": {"Light": "Inter", "Dark": "Inter"}}));
+    ex(&mut s, "variable.update", json!({"variable": "font", "scopes": ["FONT_FAMILY"]}));
+    ex(
+        &mut s,
+        "variable.create",
+        json!({"collection": "Tokens", "name": "label", "type": "string", "values": {"Light": "Say \"hi\"", "Dark": "Sag \"hi\""}}),
+    );
+    ex(&mut s, "variable.create", json!({"collection": "Tokens", "name": "flag", "type": "boolean", "values": {"Light": true, "Dark": true}}));
+    ex(&mut s, "variable.create", json!({"collection": "Tokens", "name": "wide", "type": "boolean", "values": {"Light": true, "Dark": false}}));
+    let code = uno_theme(&mut s);
+    assert!(code.contains("ThemeResourceKey<FontFamily> Font = new(\"Font\");"), "{code}");
+    assert!(code.contains("dict[Font.Key] = new FontFamily(\"Inter\");"), "equal in both: main dictionary: {code}");
+    assert!(code.contains("ThemeResourceKey<string> Label = new(\"Label\");"), "{code}");
+    assert!(code.contains("[Label.Key] = \"Say \\\"hi\\\"\",") && code.contains("[Label.Key] = \"Sag \\\"hi\\\"\","), "{code}");
+    assert!(code.contains("public const bool Flag = true;"), "{code}");
+    assert!(!code.contains("Wide ="), "{code}");
+    assert!(code.contains("// note: wide differs by mode and is left out"), "{code}");
+}
+
+#[test]
+fn uno_aliases_and_colour_calculations_are_resolved_per_mode() {
+    let mut s = Session::new();
+    ex(&mut s, "variable.createCollection", json!({"name": "Base", "modes": ["Light", "Dark"]}));
+    let surface = ex(
+        &mut s,
+        "variable.create",
+        json!({"collection": "Base", "name": "surface", "type": "color", "values": {"Light": "#ffffff", "Dark": "#101010"}}),
+    );
+    let card = ex(&mut s, "variable.create", json!({"collection": "Base", "name": "card", "type": "color", "value": {"alias": surface["id"]}}));
+    ex(&mut s, "variable.create", json!({"collection": "Base", "name": "card2", "type": "color", "value": {"alias": card["id"]}}));
+    ex(
+        &mut s,
+        "variable.create",
+        json!({"collection": "Base", "name": "scrim", "type": "color", "value": {"alpha": {"variable": surface["id"], "opacity": 0.5}}}),
+    );
+    let code = uno_theme(&mut s);
+    // An alias into another collection shows that collection's default mode, as the other formats do.
+    ex(&mut s, "variable.createCollection", json!({"name": "Semantic", "modes": ["Light", "Dark"]}));
+    ex(&mut s, "variable.create", json!({"collection": "Semantic", "name": "other", "type": "color", "value": {"alias": surface["id"]}}));
+    assert!(uno_theme(&mut s).contains("dict[OtherBrush.Key] = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));"));
+    for name in ["CardBrush", "Card2Brush"] {
+        assert!(code.contains(&format!("[{name}.Key] = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)),")), "{name}: {code}");
+        assert!(code.contains(&format!("[{name}.Key] = new SolidColorBrush(Color.FromArgb(0xFF, 0x10, 0x10, 0x10)),")), "{name}: {code}");
+    }
+    // The calculation is the colour it shows in each mode (half-transparent).
+    assert!(code.contains("[ScrimBrush.Key] = new SolidColorBrush(Color.FromArgb(0x80, 0xFF, 0xFF, 0xFF)),"), "{code}");
+    assert!(code.contains("[ScrimBrush.Key] = new SolidColorBrush(Color.FromArgb(0x80, 0x10, 0x10, 0x10)),"), "{code}");
+    assert!(!code.contains("Alias") && !code.contains("var("), "{code}");
+}
