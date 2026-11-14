@@ -1260,7 +1260,19 @@ opacity or a font weight, so `border-radius: var(--radius)` reads `12px`) or as
 Dart constants for Flutter (`format: "dart"`: an `abstract final class` per collection and mode, the
 default mode's named after the collection and the others after the collection and the mode, with a
 `static const` `Color`, `double`, `String` or `bool` per variable; names become camelCase Dart
-identifiers kept apart, aliases are resolved to their value in that mode), and
+identifiers kept apart, aliases are resolved to their value in that mode) or as a
+C# theme class for Uno Platform (`format: "uno"`: a `public static class AppTheme` with a
+`ThemeResourceKey<T>` per variable and `CreateDictionary()`, which builds a `ResourceDictionary` whose
+`Light` and `Dark` theme dictionaries come from the modes named light and dark (any case; only when no
+exported collection has one, the first and second mode), what is the same in both in the main
+dictionary; a collection with other mode names next to them is written in its default mode, and modes
+left out are `// note:` lines; colours are `ThemeResourceKey<Brush>` with a `SolidColorBrush`, a number
+that is the same in every mode is a `public const double` (usable anywhere a number goes, such as
+`.Spacing(AppTheme.Space8)`), one that differs is a `ThemeResourceKey<double>`, strings are
+`ThemeResourceKey<string>` (`<FontFamily>` for a variable scoped to font family only), a boolean is a
+`const bool` when it is the same in every mode and left out with a note otherwise; names are PascalCase
+C# identifiers kept apart (`Brush` after a colour's), aliases and colour calculations are resolved per
+mode, at most 64 collections and 5,000 variables), and
 returns `{text}` (or writes `path` and returns `{path}`). `variable.import {variables}` (an object,
 JSON text or a path to a regular file of at most 256 MiB;
 `variableCollections` and `variables` under `meta` or at the top level) reads

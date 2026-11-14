@@ -77,6 +77,17 @@ fn css_export_downloads_custom_properties() {
 }
 
 #[test]
+fn uno_export_downloads_a_cs_file() {
+    let (mut app, got) = browser(true);
+    export_dialog(&mut app, "uno");
+    let got = got.lock().unwrap();
+    let [(name, bytes)] = got.as_slice() else { panic!("one download, got {}", got.len()) };
+    assert!(name.ends_with(".variables.cs"), "{name}");
+    let code = String::from_utf8(bytes.clone()).unwrap();
+    assert!(code.contains("public static class AppTheme"), "{code}");
+}
+
+#[test]
 fn a_refused_download_says_so() {
     let (mut app, got) = browser(false);
     export_dialog(&mut app, "json");
