@@ -1114,3 +1114,84 @@ fn a_frame_that_hugs_or_fills_is_not_clipped_at_its_design_size() {
     let fixed = uno(&mut s, f);
     assert!(fixed.contains(".Clip(new RectangleGeometry().Rect(new Rect(0, 0, 240, "), "{fixed}");
 }
+
+fn collection(s: &mut Session, name: &str, modes: &[&str]) {
+    ex(s, "variable.createCollection", json!({"name": name, "modes": modes}));
+}
+
+fn variable(s: &mut Session, collection: &str, name: &str, kind: &str, value: serde_json::Value) -> String {
+    let v = ex(s, "variable.create", json!({"collection": collection, "name": name, "type": kind, "value": value}));
+    v["id"].as_str().unwrap_or_default().to_string()
+}
+
+#[test]
+fn resource_keys_are_pascal_case_with_a_brush_suffix_for_colours() {
+    use crate::codegen::uno_resource_keys;
+    let mut s = Session::new();
+    collection(&mut s, "Theme", &["Light"]);
+    let a = variable(&mut s, "Theme", "color/surface", "color", json!("#ffffff"));
+    let b = variable(&mut s, "Theme", "Surface Brush", "color", json!("#000000"));
+    let c = variable(&mut s, "Theme", "space/16", "number", json!(16));
+    let d = variable(&mut s, "Theme", "кнопка радиус", "number", json!(4));
+    let e = variable(&mut s, "Theme", "3 columns", "number", json!(3));
+    let keys = uno_resource_keys(s.doc().unwrap());
+    let name = |id: &String| keys.get(id).map(|k| k.name.clone()).unwrap_or_default();
+    assert_eq!(name(&a), "ColorSurfaceBrush");
+    // Not doubled when the name already ends in Brush.
+    assert_eq!(name(&b), "SurfaceBrush");
+    assert_eq!(name(&c), "Space16");
+    assert_eq!(name(&d), "KnopkaRadius");
+    assert_eq!(name(&e), "_3Columns");
+    assert_eq!(keys.get(&a).map(|k| k.kind), Some(VariableType::Color));
+}
+
+#[test]
+fn resource_keys_resolve_collisions_with_the_collection_then_a_number_and_never_take_the_class_members() {
+    use crate::codegen::uno_resource_keys;
+    let mut s = Session::new();
+    collection(&mut s, "Brand", &["Light"]);
+    collection(&mut s, "Brand Dark", &["Light"]);
+    collection(&mut s, "BrandDark", &["Light"]);
+    let a = variable(&mut s, "Brand", "gap", "number", json!(1));
+    let b = variable(&mut s, "Brand Dark", "gap", "number", json!(2));
+    let c = variable(&mut s, "BrandDark", "gap", "number", json!(3));
+    let d = variable(&mut s, "Brand", "app theme", "number", json!(4));
+    let e = variable(&mut s, "Brand", "create dictionary", "number", json!(5));
+    let keys = uno_resource_keys(s.doc().unwrap());
+    let name = |id: &String| keys.get(id).map(|k| k.name.clone()).unwrap_or_default();
+    assert_eq!(name(&a), "Gap");
+    assert_eq!(name(&b), "BrandDarkGap");
+    assert_eq!(name(&c), "BrandDarkGap2");
+    assert_eq!(name(&d), "BrandAppTheme");
+    assert_eq!(name(&e), "BrandCreateDictionary");
+    // Unique, so the class compiles.
+    let all: BTreeSet<&String> = keys.values().map(|k| &k.name).collect();
+    assert_eq!(all.len(), keys.len());
+}
+
+#[test]
+fn resource_keys_do_not_depend_on_what_an_export_asks_for() {
+    use crate::codegen::uno_resource_keys;
+    let mut s = Session::new();
+    collection(&mut s, "One", &["Light"]);
+    collection(&mut s, "Two", &["Light"]);
+    variable(&mut s, "One", "size", "number", json!(1));
+    let second = variable(&mut s, "Two", "size", "number", json!(2));
+    // The function takes the whole document: a later collection's key is the same however few
+    // collections an export writes.
+    assert_eq!(uno_resource_keys(s.doc().unwrap()).get(&second).map(|k| k.name.clone()).as_deref(), Some("TwoSize"));
+    assert_eq!(uno_resource_keys(s.doc().unwrap()), uno_resource_keys(s.doc().unwrap()));
+}
+
+#[test]
+fn resource_keys_are_capped() {
+    use crate::codegen::uno_resource_keys;
+    let mut s = Session::new();
+    collection(&mut s, "Many", &["Light"]);
+    let vars: Vec<serde_json::Value> = (0..5_100).map(|i| json!({"name": format!("v{i}"), "type": "number", "value": i})).collect();
+    let _ = vars;
+    for i in 0..5_001 {
+        variable(&mut s, "Many", &format!("v{i}"), "number", json!(i));
+    }
+    assert_eq!(uno_resource_keys(s.doc().unwrap()).len(), 5_000);
+}

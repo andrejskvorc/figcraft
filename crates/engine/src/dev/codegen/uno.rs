@@ -213,6 +213,48 @@ pub(crate) fn asset_name(name: &str, kind: &str, used: &mut BTreeSet<String>) ->
     name
 }
 
+/// The theme resource of one variable: the C# member name that is also the resource key, and the
+/// variable's type (a colour is a brush).
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code, reason = "used by the theme export and bound variables in layer code (U2-01.1, U2-02)"))]
+pub(crate) struct UnoKey {
+    pub(crate) name: String,
+    pub(crate) kind: figcraft_doc::VariableType,
+}
+
+/// Names the generated theme class has itself, which no variable may take.
+const THEME_MEMBERS: &[&str] = &["AppTheme", "CreateDictionary"];
+/// Most collections and variables given a key; the rest are left out.
+const MAX_KEY_COLLECTIONS: usize = 64;
+const MAX_KEY_VARIABLES: usize = 5_000;
+
+/// The key of every variable of the file's local collections, by variable id. It always walks all of
+/// them in document order, whatever subset an export is asked for, so a key never depends on the
+/// subset, and the theme export and layer code (which reads the same keys) always agree.
+/// The name is the variable's PascalCase [`cs_ident`] plus `Brush` for a colour (not doubled); a name
+/// taken already gets the collection's identifier in front, and one still taken a number (`cs_unique`).
+#[cfg_attr(not(test), allow(dead_code, reason = "used by the theme export and bound variables in layer code (U2-01.1, U2-02)"))]
+pub(crate) fn uno_resource_keys(doc: &Document) -> std::collections::BTreeMap<String, UnoKey> {
+    use figcraft_doc::VariableType;
+    let mut used: BTreeSet<String> = THEME_MEMBERS.iter().map(|m| (*m).to_string()).collect();
+    let mut out = std::collections::BTreeMap::new();
+    for c in crate::library::local_collections(doc).take(MAX_KEY_COLLECTIONS) {
+        for v in doc.variables.variables.iter().filter(|v| v.collection == c.id) {
+            if out.len() >= MAX_KEY_VARIABLES {
+                return out;
+            }
+            let mut base = cs_ident(&v.name, true, "Variable");
+            if v.kind == VariableType::Color && !base.ends_with("Brush") {
+                base.push_str("Brush");
+            }
+            let candidate = if used.contains(&base) { format!("{}{base}", cs_ident(&c.name, true, "Collection")) } else { base };
+            let name = cs_unique(&candidate, &mut used);
+            out.insert(v.id.clone(), UnoKey { name, kind: v.kind });
+        }
+    }
+    out
+}
+
 /// `Color.FromArgb(0xAA, 0xRR, 0xGG, 0xBB)` (needs `using Windows.UI;`).
 pub(crate) fn cs_color(c: Color) -> String {
     let [r, g, b, a] = c.to_rgba8();
