@@ -675,3 +675,135 @@ fn css_export_gives_clashing_variable_names_their_own_property() {
     assert_ne!(blue, "brand-primary", "{css}");
     assert!(css.contains(&format!("--link: var(--{blue});")), "{css}");
 }
+
+// ---- Uno theme resources (`variable.export {format: "uno"}`)
+
+fn uno_theme(s: &mut Session) -> String {
+    ex(s, "variable.export", json!({"format": "uno"}))["text"].as_str().unwrap_or_default().to_string()
+}
+
+fn colour(s: &mut Session, collection: &str, name: &str, values: Value) {
+    ex(s, "variable.create", json!({"collection": collection, "name": name, "type": "color", "values": values}));
+}
+
+#[test]
+fn a_two_mode_collection_is_light_and_dark_theme_dictionaries() {
+    let mut s = Session::new();
+    ex(&mut s, "variable.createCollection", json!({"name": "Theme", "modes": ["Light", "Dark"]}));
+    colour(&mut s, "Theme", "color/surface", json!({"Light": "#ffffff", "Dark": "#121212"}));
+    colour(&mut s, "Theme", "color/brand", json!({"Light": "#3b82f6", "Dark": "#3b82f6"}));
+    let expected = "// Variables exported from FigCraft.
+using Windows.UI;
+
+namespace MyApp;
+
+/// <summary>Theme resources exported from the design's variables.</summary>
+public static class AppTheme
+{
+    /// <summary>color/surface</summary>
+    public static readonly ThemeResourceKey<Brush> ColorSurfaceBrush = new(\"ColorSurfaceBrush\");
+
+    /// <summary>color/brand</summary>
+    public static readonly ThemeResourceKey<Brush> ColorBrandBrush = new(\"ColorBrandBrush\");
+
+    /// <summary>Builds the dictionary. Merge it once, for example into Application.Current.Resources.</summary>
+    public static ResourceDictionary CreateDictionary()
+    {
+        var dict = new ResourceDictionary();
+        dict[ColorBrandBrush.Key] = new SolidColorBrush(Color.FromArgb(0xFF, 0x3B, 0x82, 0xF6));
+        var light = new ResourceDictionary
+        {
+            [ColorSurfaceBrush.Key] = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)),
+        };
+        dict.ThemeDictionaries[\"Light\"] = light;
+        var dark = new ResourceDictionary
+        {
+            [ColorSurfaceBrush.Key] = new SolidColorBrush(Color.FromArgb(0xFF, 0x12, 0x12, 0x12)),
+        };
+        dict.ThemeDictionaries[\"Dark\"] = dark;
+        return dict;
+    }
+}
+";
+    assert_eq!(uno_theme(&mut s), expected);
+    // Deterministic, and the same without an explicit format list.
+    assert_eq!(uno_theme(&mut s), uno_theme(&mut s));
+    assert!(s.execute("variable.export", &json!({"format": "csharp"})).unwrap_err().to_string().contains("json|css|tailwind|dart|uno"));
+}
+
+#[test]
+fn modes_named_light_and_dark_win_over_their_position() {
+    let mut s = Session::new();
+    ex(&mut s, "variable.createCollection", json!({"name": "Theme", "modes": ["Night", "light", "DARK"]}));
+    colour(&mut s, "Theme", "bg", json!({"Night": "#010101", "light": "#ffffff", "DARK": "#000000"}));
+    let code = uno_theme(&mut s);
+    assert!(
+        code.contains(
+            "var light = new ResourceDictionary\n        {\n            [BgBrush.Key] = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)),"
+        ),
+        "{code}"
+    );
+    assert!(
+        code.contains(
+            "var dark = new ResourceDictionary\n        {\n            [BgBrush.Key] = new SolidColorBrush(Color.FromArgb(0xFF, 0x00, 0x00, 0x00)),"
+        ),
+        "{code}"
+    );
+    // The mode that is neither is not exported, and the file says so.
+    assert!(code.contains("// note: modes not exported from Theme: Night"), "{code}");
+}
+
+#[test]
+fn without_named_modes_the_first_is_light_and_the_second_dark_and_the_rest_is_noted() {
+    let mut s = Session::new();
+    ex(&mut s, "variable.createCollection", json!({"name": "Palette", "modes": ["Day", "Night", "Sepia"]}));
+    colour(&mut s, "Palette", "bg", json!({"Day": "#ffffff", "Night": "#000000", "Sepia": "#aa9977"}));
+    ex(&mut s, "variable.createCollection", json!({"name": "Accent", "modes": ["A", "B"]}));
+    colour(&mut s, "Accent", "ink", json!({"A": "#111111", "B": "#eeeeee"}));
+    let code = uno_theme(&mut s);
+    assert!(code.contains("// note: modes not exported from Palette: Sepia"), "{code}");
+    assert!(code.contains("[BgBrush.Key] = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF))"), "{code}");
+    assert!(code.contains("[InkBrush.Key] = new SolidColorBrush(Color.FromArgb(0xFF, 0x11, 0x11, 0x11))"), "{code}");
+    assert!(code.contains("[InkBrush.Key] = new SolidColorBrush(Color.FromArgb(0xFF, 0xEE, 0xEE, 0xEE))"), "{code}");
+    // One mode only: main dictionary, no theme dictionaries.
+    ex(&mut s, "variable.createCollection", json!({"name": "Fixed", "modes": ["Only"]}));
+    colour(&mut s, "Fixed", "line", json!({"Only": "#808080"}));
+    let code = uno_theme(&mut s);
+    assert!(code.contains("dict[LineBrush.Key] = new SolidColorBrush(Color.FromArgb(0xFF, 0x80, 0x80, 0x80));"), "{code}");
+}
+
+#[test]
+fn a_collection_that_is_not_a_theme_next_to_a_light_dark_one_is_exported_in_its_default_mode() {
+    let mut s = Session::new();
+    ex(&mut s, "variable.createCollection", json!({"name": "Theme", "modes": ["Light", "Dark"]}));
+    colour(&mut s, "Theme", "bg", json!({"Light": "#ffffff", "Dark": "#000000"}));
+    ex(&mut s, "variable.createCollection", json!({"name": "Language", "modes": ["English", "German"]}));
+    colour(&mut s, "Language", "flag", json!({"English": "#ff0000", "German": "#00ff00"}));
+    let code = uno_theme(&mut s);
+    assert!(code.contains("// note: Language has no light or dark mode: its default mode English is exported; left out: German"), "{code}");
+    assert!(code.contains("dict[FlagBrush.Key] = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0x00, 0x00));"), "{code}");
+    assert!(!code.contains("0x00, 0xFF, 0x00"), "{code}");
+}
+
+#[test]
+fn at_most_sixty_four_collections_are_written() {
+    let mut s = Session::new();
+    for i in 0..66 {
+        ex(&mut s, "variable.createCollection", json!({"name": format!("C{i}"), "modes": ["M"]}));
+        colour(&mut s, &format!("C{i}"), &format!("v{i}"), json!({"M": "#010203"}));
+    }
+    let code = uno_theme(&mut s);
+    assert!(code.contains("// note: only the first 64 of 66 collections are exported"), "{code}");
+    assert_eq!(code.matches("public static readonly ThemeResourceKey<Brush>").count(), 64, "{code}");
+}
+
+#[test]
+fn the_uno_export_refuses_junk_collections_and_exports_nothing_for_an_empty_file() {
+    let mut s = Session::new();
+    for junk in [json!([1, null]), json!("Theme"), json!(["nope"])] {
+        assert!(s.execute("variable.export", &json!({"format": "uno", "collections": junk})).is_err());
+    }
+    let code = uno_theme(&mut s);
+    assert!(code.contains("public static class AppTheme") && code.contains("return dict;"), "{code}");
+    assert!(!code.contains("using Windows.UI;"), "{code}");
+}

@@ -1,6 +1,6 @@
 //! Variables import and export: a file's collections as the local variables JSON (the shape the
-//! REST importer reads, so exports round-trip), as CSS custom properties or as Dart constants for
-//! Flutter, and such JSON read back into a file.
+//! REST importer reads, so exports round-trip), as CSS custom properties, as Dart constants for
+//! Flutter or as a theme class for Uno, and such JSON read back into a file.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -8,7 +8,7 @@ use figcraft_doc::{Collection, CollectionId, Document, Mode, ModeId, Variable, V
 use serde_json::{Value, json};
 
 use super::CommandSpec;
-use crate::codegen::{CssNames, css_var_name};
+use crate::codegen::{CssNames, cs_color, cs_literal, css_var_name, uno_resource_keys};
 use crate::library::{is_remote_collection, local_collections};
 use crate::params::{get, string};
 use crate::{EngineError, Result, Session, bad, spec};
@@ -18,7 +18,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "variable.export",
             "Export variables",
-            "{collections? [ids or names; default every collection of this file, not library copies], format? (json (default): the local variables JSON that variable.import reads, colour calculations as the colour they show in each mode with other collections in their default modes | css: custom properties, the default mode on :root and each other mode on [data-<collection>=\"<mode>\"], colour calculations as the colour they show in that mode with other collections in their default modes; numbers in px unless layers or scopes use them as opacity or font weight | tailwind: a Tailwind CSS v4 stylesheet, the default mode as an @theme block named the way inspect.code's tailwind utilities read them: --color-*, --radius-*, --text-*, --spacing-*, --font-*, unique per file; each other mode as in css; colour calculations as the colour they show in that mode, other collections in their default modes) | dart: a Dart file for Flutter, a class of constants per collection and mode (Color, double, String, bool), aliases and colour calculations resolved), path? (write it there)}  → {text}, or {path} when written",
+            "{collections? [ids or names; default every collection of this file, not library copies], format? (json (default): the local variables JSON that variable.import reads, colour calculations as the colour they show in each mode with other collections in their default modes | css: custom properties, the default mode on :root and each other mode on [data-<collection>=\"<mode>\"], colour calculations as the colour they show in that mode with other collections in their default modes; numbers in px unless layers or scopes use them as opacity or font weight | tailwind: a Tailwind CSS v4 stylesheet, the default mode as an @theme block named the way inspect.code's tailwind utilities read them: --color-*, --radius-*, --text-*, --spacing-*, --font-*, unique per file; each other mode as in css; colour calculations as the colour they show in that mode, other collections in their default modes) | dart: a Dart file for Flutter, a class of constants per collection and mode (Color, double, String, bool), aliases and colour calculations resolved) | uno: a C# file for Uno Platform, a static AppTheme class with a typed ThemeResourceKey per variable (colours as brushes) and CreateDictionary(), whose Light and Dark theme dictionaries come from the modes named light and dark (else the first and second mode; other collections in their default mode), aliases and colour calculations resolved), path? (write it there)}  → {text}, or {path} when written",
             false,
             export
         ),
@@ -49,7 +49,8 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
         "css" => css(doc, &colls, false),
         "tailwind" => css(doc, &colls, true),
         "dart" => dart(&doc.variables, &colls),
-        _ => return Err(bad(cmd, "format: json|css|tailwind|dart")),
+        "uno" => uno_theme(doc, &colls),
+        _ => return Err(bad(cmd, "format: json|css|tailwind|dart|uno")),
     };
     match string(p, "path") {
         Some(path) => {
@@ -113,6 +114,128 @@ fn css(doc: &Document, colls: &[&Collection], tailwind: bool) -> String {
             out.push_str("}\n");
         }
     }
+    out
+}
+
+/// Most collections the Uno theme writes.
+const UNO_MAX_COLLECTIONS: usize = 64;
+/// Most lines of notes at the top of the Uno theme.
+const UNO_MAX_NOTES: usize = 40;
+
+/// A name or description on one line of an XML documentation comment, at most 200 characters.
+fn xml_summary(text: &str) -> String {
+    let one: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).take(200).collect();
+    one.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// The variables as a C# file for Uno Platform: a `public static class AppTheme` with a
+/// `ThemeResourceKey<T>` per variable (named by [`uno_resource_keys`], which layer code reads too) and
+/// `CreateDictionary()`, which builds a `ResourceDictionary` with `Light` and `Dark` theme
+/// dictionaries and what is the same in both in the main dictionary. A mode named light or dark (any
+/// case) is that theme; only when no exported collection has one, the first mode is Light and the
+/// second Dark. A collection with other mode names next to those is exported in its default mode. Aliases
+/// and colour calculations are resolved per mode, other collections in their default modes. A colour is
+/// always a brush; a `Color` key would come with gradients and shadows that read variables.
+fn uno_theme(doc: &Document, colls: &[&Collection]) -> String {
+    let vars = &doc.variables;
+    let keys = uno_resource_keys(doc);
+    let named = |m: &Mode, word: &str| m.name.trim().eq_ignore_ascii_case(word);
+    let any_named = colls.iter().any(|c| c.modes.iter().any(|m| named(m, "light") || named(m, "dark")));
+    let mut notes: Vec<String> = Vec::new();
+    if colls.len() > UNO_MAX_COLLECTIONS {
+        notes.push(format!("only the first {UNO_MAX_COLLECTIONS} of {} collections are exported", colls.len()));
+    }
+    // Declarations of the class, and the lines of the main, light and dark dictionaries.
+    let (mut decls, mut main, mut light, mut dark): (Vec<String>, Vec<String>, Vec<String>, Vec<String>) = Default::default();
+    for c in colls.iter().take(UNO_MAX_COLLECTIONS) {
+        let (l, d): (Option<&Mode>, Option<&Mode>) = if any_named {
+            match (c.modes.iter().find(|m| named(m, "light")), c.modes.iter().find(|m| named(m, "dark"))) {
+                (None, None) => {
+                    let m = c.modes.first();
+                    if c.modes.len() > 1 {
+                        let others: Vec<&str> = c.modes.iter().skip(1).map(|m| m.name.as_str()).collect();
+                        notes.push(format!(
+                            "{} has no light or dark mode: its default mode {} is exported; left out: {}",
+                            xml_summary(&c.name),
+                            m.map_or("", |m| m.name.as_str()),
+                            xml_summary(&others.join(", "))
+                        ));
+                    }
+                    (m, m)
+                }
+                (Some(x), None) | (None, Some(x)) => (Some(x), Some(x)),
+                (Some(a), Some(b)) => (Some(a), Some(b)),
+            }
+        } else {
+            (c.modes.first(), c.modes.get(1).or(c.modes.first()))
+        };
+        if let (Some(l), Some(d)) = (l, d) {
+            let left: Vec<&str> = c.modes.iter().filter(|m| m.id != l.id && m.id != d.id).map(|m| m.name.as_str()).collect();
+            // A collection that is not a theme was noted above with its other modes.
+            if !left.is_empty() && !(any_named && l.id == d.id && !named(l, "light") && !named(l, "dark")) {
+                notes.push(format!("modes not exported from {}: {}", xml_summary(&c.name), xml_summary(&left.join(", "))));
+            }
+        }
+        let (Some(l), Some(d)) = (l, d) else { continue };
+        for v in vars.variables.iter().filter(|v| v.collection == c.id) {
+            let Some(key) = keys.get(&v.id) else { continue };
+            let at = |m: &Mode| vars.resolve(&v.id, &BTreeMap::from([(c.id.clone(), m.id.clone())]));
+            let (lv, dv) = (at(l), at(d));
+            let (lv, dv) = (lv.clone().or_else(|| dv.clone()), dv.or(lv));
+            let mut summary = xml_summary(&v.name);
+            if !v.description.trim().is_empty() {
+                summary = format!("{summary}: {}", xml_summary(&v.description));
+            }
+            let name = &key.name;
+            match (key.kind, lv, dv) {
+                (figcraft_doc::VariableType::Color, Some(VariableValue::Color(a)), Some(VariableValue::Color(b))) => {
+                    decls.push(format!(
+                        "    /// <summary>{summary}</summary>\n    public static readonly ThemeResourceKey<Brush> {name} = new({});",
+                        cs_literal(name)
+                    ));
+                    let brush = |c| format!("new SolidColorBrush({})", cs_color(c));
+                    if cs_color(a) == cs_color(b) {
+                        main.push(format!("        dict[{name}.Key] = {};", brush(a)));
+                    } else {
+                        light.push(format!("            [{name}.Key] = {},", brush(a)));
+                        dark.push(format!("            [{name}.Key] = {},", brush(b)));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut body = String::new();
+    for d in &decls {
+        body.push_str(&format!("{d}\n\n"));
+    }
+    body.push_str("    /// <summary>Builds the dictionary. Merge it once, for example into Application.Current.Resources.</summary>\n");
+    body.push_str("    public static ResourceDictionary CreateDictionary()\n    {\n        var dict = new ResourceDictionary();\n");
+    for m in &main {
+        body.push_str(&format!("{m}\n"));
+    }
+    for (var, theme, lines) in [("light", "Light", &light), ("dark", "Dark", &dark)] {
+        if lines.is_empty() {
+            continue;
+        }
+        body.push_str(&format!("        var {var} = new ResourceDictionary\n        {{\n"));
+        for l in lines {
+            body.push_str(&format!("{l}\n"));
+        }
+        body.push_str(&format!("        }};\n        dict.ThemeDictionaries[\"{theme}\"] = {var};\n"));
+    }
+    body.push_str("        return dict;\n    }\n");
+    let mut out = String::from("// Variables exported from FigCraft.\n");
+    for n in notes.iter().take(UNO_MAX_NOTES) {
+        out.push_str(&format!("// note: {n}\n"));
+    }
+    if notes.len() > UNO_MAX_NOTES {
+        out.push_str(&format!("// note: {} more notes left out\n", notes.len() - UNO_MAX_NOTES));
+    }
+    if body.contains("Color.FromArgb(") {
+        out.push_str("using Windows.UI;\n");
+    }
+    out.push_str(&format!("\nnamespace MyApp;\n\n/// <summary>Theme resources exported from the design's variables.</summary>\npublic static class AppTheme\n{{\n{body}}}\n"));
     out
 }
 

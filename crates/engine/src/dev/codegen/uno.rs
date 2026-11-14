@@ -216,7 +216,6 @@ pub(crate) fn asset_name(name: &str, kind: &str, used: &mut BTreeSet<String>) ->
 /// The theme resource of one variable: the C# member name that is also the resource key, and the
 /// variable's type (a colour is a brush).
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(not(test), allow(dead_code, reason = "used by the theme export and bound variables in layer code (U2-01.1, U2-02)"))]
 pub(crate) struct UnoKey {
     pub(crate) name: String,
     pub(crate) kind: figcraft_doc::VariableType,
@@ -233,7 +232,6 @@ const MAX_KEY_VARIABLES: usize = 5_000;
 /// subset, and the theme export and layer code (which reads the same keys) always agree.
 /// The name is the variable's PascalCase [`cs_ident`] plus `Brush` for a colour (not doubled); a name
 /// taken already gets the collection's identifier in front, and one still taken a number (`cs_unique`).
-#[cfg_attr(not(test), allow(dead_code, reason = "used by the theme export and bound variables in layer code (U2-01.1, U2-02)"))]
 pub(crate) fn uno_resource_keys(doc: &Document) -> std::collections::BTreeMap<String, UnoKey> {
     use figcraft_doc::VariableType;
     let mut used: BTreeSet<String> = THEME_MEMBERS.iter().map(|m| (*m).to_string()).collect();
