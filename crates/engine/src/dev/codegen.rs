@@ -40,7 +40,7 @@ pub(crate) use swift::swift;
 pub(crate) use uno::uno;
 #[cfg(test)]
 pub(crate) use uno::{asset_name, cs_ident, cs_unique, path_data};
-pub(crate) use uno::{cs_color, cs_literal, uno_resource_keys};
+pub(crate) use uno::{cs_color, cs_literal, uno_font_family, uno_resource_keys};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![spec!(

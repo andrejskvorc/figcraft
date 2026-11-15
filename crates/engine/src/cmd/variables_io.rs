@@ -217,7 +217,7 @@ fn uno_theme(doc: &Document, colls: &[&Collection]) -> String {
                     }
                 }
                 (figcraft_doc::VariableType::String, Some(VariableValue::String(a)), Some(VariableValue::String(b))) => {
-                    if v.scopes.as_deref().is_some_and(|sc| sc.len() == 1 && sc.iter().all(|x| x == "FONT_FAMILY")) {
+                    if crate::codegen::uno_font_family(v) {
                         let family = |t: &str| format!("new FontFamily({})", cs_literal(t));
                         entry("FontFamily", family(&a), family(&b));
                     } else {

@@ -221,6 +221,12 @@ pub(crate) struct UnoKey {
     pub(crate) kind: figcraft_doc::VariableType,
 }
 
+/// Whether a string variable is a font family in the theme: scoped to font family and nothing else
+/// (the theme file writes it as a `FontFamily`, any other string as a `string`).
+pub(crate) fn uno_font_family(v: &figcraft_doc::Variable) -> bool {
+    v.kind == figcraft_doc::VariableType::String && v.scopes.as_deref().is_some_and(|sc| sc.len() == 1 && sc.iter().all(|x| x == "FONT_FAMILY"))
+}
+
 /// Names the generated theme class has itself, which no variable may take.
 const THEME_MEMBERS: &[&str] = &["AppTheme", "CreateDictionary"];
 /// Most collections and variables given a key; the rest are left out.
@@ -380,13 +386,18 @@ struct Gen<'a> {
     free_frames: usize,
     /// The names of the locals given out.
     names: BTreeSet<String>,
+    /// The theme resource key of every variable of the file (what `variable.export {format: "uno"}`
+    /// writes); a variable without one is written as the literal it stands for.
+    keys: std::collections::BTreeMap<String, UnoKey>,
+    /// Whether any key was written, which the view's header says.
+    theme_used: bool,
 }
 
 /// Uno C# Markup for layer `id` and its subtree: a `UserControl` class whose content is the tree.
 pub(crate) fn uno(doc: &Document, id: NodeId) -> String {
     let Some(root) = doc.node(id) else { return String::new() };
     let ctx = Ctx::new(doc, id);
-    let mut g = Gen { ctx: &ctx, assets: BTreeSet::new(), free_frames: 0, names: BTreeSet::new() };
+    let mut g = Gen { ctx: &ctx, assets: BTreeSet::new(), free_frames: 0, names: BTreeSet::new(), keys: uno_resource_keys(doc), theme_used: false };
     let mut top = match g.layer(root, 0, Place::Root) {
         Some(e) => e,
         None => {
@@ -432,13 +443,43 @@ pub(crate) fn uno(doc: &Document, id: NodeId) -> String {
     if !name.ends_with("View") {
         name.push_str("View");
     }
-    out.push_str(&format!("// {}\nnamespace MyApp;\n\n", comment_name(&root.name)));
+    out.push_str(&format!("// {}\n", comment_name(&root.name)));
+    if g.theme_used {
+        out.push_str("// theme: AppTheme comes from variable.export {format: \"uno\"}\n");
+    }
+    out.push_str("namespace MyApp;\n\n");
     out.push_str(&format!("internal sealed partial class {name} : UserControl\n{{\n"));
     out.push_str(&format!("    public {name}()\n    {{\n{body}    }}\n}}\n"));
     out
 }
 
 impl Gen<'_> {
+    /// The variable bound to the first of `fields` of `n` that has a theme resource key.
+    fn key_of(&self, n: &Node, fields: &[&str]) -> Option<(&figcraft_doc::Variable, &UnoKey)> {
+        let v = fields.iter().find_map(|f| crate::devinspect::bound_variable(self.ctx.doc, n, f))?;
+        self.keys.get(&v.id).map(|k| (v, k))
+    }
+
+    /// The brush for a colour bound to a variable: `ThemeResource.Get<Brush>(AppTheme.<Key>)`. `None`
+    /// when `field` is not bound to a colour with a key, or when the colour cannot be the brush as it
+    /// is (a paint with its own opacity, or a paint that is not a plain colour): the literal stays, with
+    /// a note in the first case.
+    fn bound_colour(&mut self, e: &mut Element, n: &Node, field: &str, paints: &[figcraft_color::Paint]) -> Option<String> {
+        let (v, key) = self.key_of(n, &[field])?;
+        if key.kind != figcraft_doc::VariableType::Color {
+            return None;
+        }
+        let first = paints.iter().find(|p| p.visible)?;
+        let PaintKind::Solid { color } = &first.kind else { return None };
+        if first.opacity < 1.0 || color.a < 1.0 {
+            e.note(&format!("variable {} with paint opacity written as a literal", comment_name(&v.name)));
+            return None;
+        }
+        let expr = format!("ThemeResource.Get<Brush>(AppTheme.{})", key.name);
+        self.theme_used = true;
+        Some(expr)
+    }
+
     /// A local name from a layer name, unique in the view (`card`, `card2`, …).
     fn fresh(&mut self, name: &str, kind: &str) -> String {
         let base = cs_ident(name, false, kind);
@@ -675,7 +716,8 @@ impl Gen<'_> {
             Some(PaintKind::Pattern(_)) => e.note("pattern fill"),
             Some(PaintKind::Solid { .. }) => {
                 if let Some(c) = first_fill(n) {
-                    e.call(format!(".Background({})", cs_color(c)));
+                    let brush = self.bound_colour(e, n, "fill", &n.fills).unwrap_or_else(|| cs_color(c));
+                    e.call(format!(".Background({brush})"));
                 }
             }
             None => {}
@@ -684,7 +726,8 @@ impl Gen<'_> {
             e.note(&format!("{} more fills (only the first is drawn)", visible.len() - 1));
         }
         if let Some(c) = stroke_color(n) {
-            e.call(format!(".BorderBrush({})", cs_color(c)));
+            let brush = self.bound_colour(e, n, "stroke", &n.strokes).unwrap_or_else(|| cs_color(c));
+            e.call(format!(".BorderBrush({brush})"));
             match n.stroke.sides {
                 // Per-side weights are top, right, bottom, left; `Thickness` takes left first.
                 Some([t, r, b, l]) => e.call(format!(".BorderThickness(new Thickness({}, {}, {}, {}))", num(l), num(t), num(r), num(b))),
@@ -713,10 +756,12 @@ impl Gen<'_> {
         place(&mut e, n, at);
         size(&mut e, n, at);
         if let Some(c) = first_fill(n) {
-            e.call(format!(".Fill({})", cs_color(c)));
+            let brush = self.bound_colour(&mut e, n, "fill", &n.fills).unwrap_or_else(|| cs_color(c));
+            e.call(format!(".Fill({brush})"));
         }
         if let Some(c) = stroke_color(n) {
-            e.call(format!(".Stroke({})", cs_color(c)));
+            let brush = self.bound_colour(&mut e, n, "stroke", &n.strokes).unwrap_or_else(|| cs_color(c));
+            e.call(format!(".Stroke({brush})"));
             e.call(format!(".StrokeThickness({})", num(n.stroke.weight)));
             if n.stroke.align != StrokeAlign::Center {
                 e.note("stroke inside or outside (an ellipse stroke is centred)");
@@ -764,10 +809,12 @@ impl Gen<'_> {
         place(&mut e, n, at);
         e.call(format!(".Data({})", cs_literal(&data)));
         if let Some(c) = first_fill(n) {
-            e.call(format!(".Fill({})", cs_color(c)));
+            let brush = self.bound_colour(&mut e, n, "fill", &n.fills).unwrap_or_else(|| cs_color(c));
+            e.call(format!(".Fill({brush})"));
         }
         if let Some(c) = stroke_color(n) {
-            e.call(format!(".Stroke({})", cs_color(c)));
+            let brush = self.bound_colour(&mut e, n, "stroke", &n.strokes).unwrap_or_else(|| cs_color(c));
+            e.call(format!(".Stroke({brush})"));
             e.call(format!(".StrokeThickness({})", num(n.stroke.weight)));
             if n.stroke.align != StrokeAlign::Center {
                 // A `Path` stroke is centred on the outline.
@@ -786,6 +833,23 @@ impl Gen<'_> {
         let fixed = matches!(t.auto_resize, TextAutoResize::None | TextAutoResize::Truncate);
         let framed = fixed && t.align_v != TextAlignV::Top;
         let mut tb = text_block(n, t, !framed, line_axes(n, at));
+        // The colour and family a variable is bound to, in place of the literals.
+        if let Some(brush) = self.bound_colour(&mut tb, n, "fill", &n.fills)
+            && let Some(i) = tb.calls.iter().position(|c| c.starts_with(".Foreground("))
+            && let Some(c) = tb.calls.get_mut(i)
+        {
+            *c = format!(".Foreground({brush})");
+        }
+        let family = self
+            .key_of(n, &["fontFamily"])
+            .filter(|(v, _)| uno_font_family(v))
+            .map(|(_, k)| format!("ThemeResource.Get<FontFamily>(AppTheme.{})", k.name));
+        if let Some(expr) = family
+            && let Some(c) = tb.calls.iter_mut().find(|c| c.starts_with(".FontFamily("))
+        {
+            *c = format!(".FontFamily({expr})");
+            self.theme_used = true;
+        }
         let leading = leading(&t.style);
         // In a `Canvas` the offset takes the shift; anywhere else the recipe below does.
         let at_text = match (leading, at) {

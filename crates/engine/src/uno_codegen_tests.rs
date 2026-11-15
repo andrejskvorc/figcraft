@@ -1195,3 +1195,81 @@ fn resource_keys_are_capped() {
     }
     assert_eq!(uno_resource_keys(s.doc().unwrap()).len(), 5_000);
 }
+
+fn bind(s: &mut Session, id: NodeId, field: &str, variable: &str) {
+    ex(s, "variable.bind", json!({"ids": [id], "field": field, "variable": variable}));
+}
+
+#[test]
+fn bound_colours_and_font_families_are_theme_lookups_and_the_view_says_where_the_theme_comes_from() {
+    let mut s = Session::new();
+    collection(&mut s, "Theme", &["Light", "Dark"]);
+    variable(&mut s, "Theme", "color/surface", "color", json!("#ffffff"));
+    variable(&mut s, "Theme", "color/line", "color", json!("#cccccc"));
+    variable(&mut s, "Theme", "color/ink", "color", json!("#111111"));
+    variable(&mut s, "Theme", "font/body", "string", json!("Inter"));
+    ex(&mut s, "variable.update", json!({"variable": "font/body", "scopes": ["FONT_FAMILY"]}));
+    let f = frame(&mut s, "Card", 200.0, 100.0);
+    set(&mut s, f, json!({"fill": "#ffffff", "stroke": "#cccccc", "strokeWeight": 1, "layout": "vertical", "padding": 8, "gap": 4}));
+    bind(&mut s, f, "fill", "color/surface");
+    bind(&mut s, f, "stroke", "color/line");
+    let t = idv(&ex(
+        &mut s,
+        "text.create",
+        json!({"text": "Hi", "x": 0, "y": 0, "parent": f, "props": {"name": "Label", "fill": "#111111", "fontFamily": "Inter"}}),
+    ));
+    bind(&mut s, t, "fill", "color/ink");
+    bind(&mut s, t, "fontFamily", "font/body");
+    let dot = idv(&ex(
+        &mut s,
+        "shape.ellipse",
+        json!({"x": 0, "y": 0, "width": 10, "height": 10, "parent": f, "props": {"name": "Dot", "fill": "#ffffff"}}),
+    ));
+    bind(&mut s, dot, "fill", "color/surface");
+    let code = uno(&mut s, f);
+    let card = chain(&code, "card");
+    assert!(card.contains(&".Background(ThemeResource.Get<Brush>(AppTheme.ColorSurfaceBrush))".to_string()), "{code}");
+    assert!(card.contains(&".BorderBrush(ThemeResource.Get<Brush>(AppTheme.ColorLineBrush))".to_string()), "{code}");
+    assert!(chain(&code, "label").contains(&".Foreground(ThemeResource.Get<Brush>(AppTheme.ColorInkBrush))".to_string()), "{code}");
+    assert!(chain(&code, "label").contains(&".FontFamily(ThemeResource.Get<FontFamily>(AppTheme.FontBody))".to_string()), "{code}");
+    assert!(chain(&code, "dot").contains(&".Fill(ThemeResource.Get<Brush>(AppTheme.ColorSurfaceBrush))".to_string()), "{code}");
+    assert!(code.contains("// theme: AppTheme comes from variable.export {format: \"uno\"}\nnamespace MyApp;"), "{code}");
+    // The key in the layer code is the key the export writes.
+    let theme = ex(&mut s, "variable.export", json!({"format": "uno"}))["text"].as_str().unwrap_or_default().to_string();
+    for key in ["ColorSurfaceBrush", "ColorLineBrush", "ColorInkBrush"] {
+        assert!(theme.contains(&format!("ThemeResourceKey<Brush> {key} = new(\"{key}\")")), "{theme}");
+    }
+    assert!(theme.contains("ThemeResourceKey<FontFamily> FontBody = new(\"FontBody\")"), "{theme}");
+    // Unbound layers keep their literals and the view has no theme line.
+    let plain = frame(&mut s, "Plain", 50.0, 50.0);
+    let code = uno(&mut s, plain);
+    assert!(!code.contains("ThemeResource") && !code.contains("// theme:"), "{code}");
+}
+
+#[test]
+fn a_bound_colour_with_paint_opacity_stays_a_literal_with_a_note() {
+    let mut s = Session::new();
+    collection(&mut s, "Theme", &["Light"]);
+    variable(&mut s, "Theme", "scrim", "color", json!("#00000080"));
+    let f = frame(&mut s, "Veil", 100.0, 100.0);
+    bind(&mut s, f, "fill", "scrim");
+    let code = uno(&mut s, f);
+    let c = chain(&code, "veil");
+    assert!(c.contains(&".Background(Color.FromArgb(0x80, 0x00, 0x00, 0x00))".to_string()), "{code}");
+    assert!(c.contains(&"// not mapped: variable scrim with paint opacity written as a literal".to_string()), "{code}");
+    assert!(!code.contains("ThemeResource") && !code.contains("// theme:"), "{code}");
+}
+
+#[test]
+fn a_variable_of_the_wrong_type_or_a_plain_string_for_a_family_stays_a_literal() {
+    let mut s = Session::new();
+    collection(&mut s, "Theme", &["Light"]);
+    variable(&mut s, "Theme", "name", "string", json!("Inter"));
+    let f = frame(&mut s, "Box", 100.0, 100.0);
+    let t = idv(&ex(&mut s, "text.create", json!({"text": "Hi", "x": 0, "y": 0, "parent": f, "props": {"name": "T", "fontFamily": "Inter"}})));
+    // A string variable that is not scoped to font family is a `string` resource: no family.
+    bind(&mut s, t, "fontFamily", "name");
+    let code = uno(&mut s, f);
+    assert!(chain(&code, "t").contains(&".FontFamily(\"Inter\")".to_string()), "{code}");
+    assert!(!code.contains("ThemeResource"), "{code}");
+}
