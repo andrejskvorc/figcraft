@@ -1500,3 +1500,55 @@ fn a_layer_pinned_to_a_mode_the_export_does_not_write_has_literals_and_a_note() 
     // The frame beside it still reads the theme.
     assert!(chain(&code, "night").iter().any(|l| l.starts_with(".Background(ThemeResource.Get<Brush>(")), "{code}");
 }
+
+#[test]
+fn a_lookup_is_never_divided_so_a_per_mode_opacity_stays_a_literal_with_a_note() {
+    let mut s = Session::new();
+    collection(&mut s, "Theme", &["Light", "Dark"]);
+    variable(&mut s, "Theme", "opacity/muted", "number", json!(50));
+    ex(&mut s, "variable.set", json!({"variable": "opacity/muted", "mode": "Dark", "value": 80}));
+    let f = frame(&mut s, "Bar", 100.0, 10.0);
+    set(&mut s, f, json!({"opacity": 0.5}));
+    bind(&mut s, f, "opacity", "opacity/muted");
+    let code = uno(&mut s, f);
+    let c = chain(&code, "bar");
+    assert!(c.contains(&".Opacity(0.5)".to_string()), "{code}");
+    assert!(c.contains(&"// not mapped: variable opacity/muted differs by mode here".to_string()), "{code}");
+    // Nowhere does an operator follow a lookup; a constant opacity still divides.
+    assert!(!code.contains("ThemeResource.Get<double>(AppTheme.OpacityMuted) /"), "{code}");
+    variable(&mut s, "Theme", "opacity/fixed", "number", json!(50));
+    bind(&mut s, f, "opacity", "opacity/fixed");
+    assert!(chain(&uno(&mut s, f), "bar").contains(&".Opacity(AppTheme.OpacityFixed / 100)".to_string()));
+}
+
+#[test]
+fn a_gap_of_zero_in_one_theme_is_still_a_lookup() {
+    let mut s = Session::new();
+    collection(&mut s, "Theme", &["Light", "Dark"]);
+    variable(&mut s, "Theme", "gap/theme", "number", json!(0));
+    ex(&mut s, "variable.set", json!({"variable": "gap/theme", "mode": "Dark", "value": 8}));
+    let f = row(&mut s, json!({"gap": 0}));
+    bind(&mut s, f, "gap", "gap/theme");
+    let code = uno(&mut s, f);
+    // Not written for a gap of zero, but Dark has 8: the call is there with the lookup, after the orientation.
+    let c = chain(&code, "row");
+    let at = |p: &str| c.iter().position(|l| l.starts_with(p));
+    assert!(c.contains(&".Spacing(ThemeResource.Get<double>(AppTheme.GapTheme))".to_string()), "{code}");
+    assert_eq!(at(".Spacing("), at(".Orientation(").map(|i| i + 1), "{code}");
+    // A grid: both gaps, the row gap after the column gap.
+    variable(&mut s, "Theme", "cross/theme", "number", json!(0));
+    ex(&mut s, "variable.set", json!({"variable": "cross/theme", "mode": "Dark", "value": 4}));
+    let g = grid(&mut s, json!({"columnTracks": ["1fr"], "rowTracks": ["1fr"], "gap": 0, "crossGap": 0}));
+    bind(&mut s, g, "gap", "gap/theme");
+    bind(&mut s, g, "crossGap", "cross/theme");
+    let code = uno(&mut s, g);
+    let c = chain(&code, "table");
+    let at = |p: &str| c.iter().position(|l| l.starts_with(p));
+    assert!(c.contains(&".ColumnSpacing(ThemeResource.Get<double>(AppTheme.GapTheme))".to_string()), "{code}");
+    assert!(c.contains(&".RowSpacing(ThemeResource.Get<double>(AppTheme.CrossTheme))".to_string()), "{code}");
+    assert_eq!(at(".RowSpacing("), at(".ColumnSpacing(").map(|i| i + 1), "{code}");
+    // A number that is zero in every theme adds nothing.
+    variable(&mut s, "Theme", "gap/none", "number", json!(0));
+    bind(&mut s, f, "gap", "gap/none");
+    assert!(!chain(&uno(&mut s, f), "row").iter().any(|l| l.starts_with(".Spacing(")));
+}

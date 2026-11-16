@@ -453,6 +453,19 @@ enum Place {
     },
 }
 
+/// Where the gap setter `call` goes in `e` when it is left out because the gap is zero: after the
+/// orientation of an `AutoLayout` (unless its space distribution makes the gaps) or after the tracks of
+/// a `Grid` (the row spacing after the column spacing). `None` for any other element or call.
+fn gap_slot(e: &Element, n: &Node, call: &str) -> Option<usize> {
+    let after = |prefixes: &[&str]| prefixes.iter().find_map(|p| e.calls.iter().position(|c| c.starts_with(p))).map(|i| i + 1);
+    match call {
+        "Spacing" if e.ctor == "new AutoLayout()" && n.layout.as_ref().is_some_and(|l| !l.main_align.is_auto_gap()) => after(&[".Orientation("]),
+        "ColumnSpacing" if e.ctor == "new Grid()" => after(&[".RowDefinitions("]),
+        "RowSpacing" if e.ctor == "new Grid()" => after(&[".ColumnSpacing(", ".RowDefinitions("]),
+        _ => None,
+    }
+}
+
 /// A single-number setter that a variable can be bound to.
 struct Setter {
     call: &'static str,
@@ -663,8 +676,23 @@ impl Gen<'_> {
         ];
         for Setter { call, fields, value, lookup, factor } in table {
             let Some(value) = value else { continue };
+            // A lookup cannot be divided (`ThemeResource.Get<double>(…) / 100` does not compile): a number
+            // that differs by theme stays a literal where the variable has a factor.
+            let lookup = lookup && factor == 1.0;
             let literal = format!(".{call}({})", num(value));
-            let Some(i) = e.calls.iter().position(|c| *c == literal) else { continue };
+            let i = match e.calls.iter().position(|c| *c == literal) {
+                Some(i) => i,
+                // A gap of zero is not written, but it may be the value in one theme only.
+                None => {
+                    let Some(at) = gap_slot(e, n, call).filter(|_| lookup && value == 0.0) else { continue };
+                    let bound = self.number(&mut Element::new(""), n, fields, 0.0, true);
+                    if !bound.starts_with("ThemeResource.Get") {
+                        continue;
+                    }
+                    e.calls.insert(at, literal);
+                    at
+                }
+            };
             let mut notes = Element::new("");
             let shown = value * factor;
             let expr = self.number(&mut notes, n, fields, shown, lookup);

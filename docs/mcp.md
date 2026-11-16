@@ -1810,7 +1810,7 @@ permissions: without it nothing is downloaded); `plugin.directory.publish {path 
   (a string variable scoped to font family) as `ThemeResource.Get<FontFamily>(AppTheme.Key)`, a number the same in both themes as the
   constant `AppTheme.Key` wherever the number goes (`Spacing`, `ColumnSpacing`, `RowSpacing`, each argument of `Padding`, `CornerRadius`,
   `BorderThickness`, `StrokeThickness`, `Width`, `Height`, `FontSize`; an opacity variable is a percentage: `AppTheme.Key / 100`), and a
-  number that differs by theme as `ThemeResource.Get<double>(AppTheme.Key)` where the property takes one number, elsewhere as the literal with
+  number that differs by theme as `ThemeResource.Get<double>(AppTheme.Key)` where the property takes one number (also a gap of zero in one theme, which is added to the chain; never an opacity, which is divided), elsewhere as the literal with
   `// not mapped: variable <name> differs by mode here`. A padding less the stroke weight is `AppTheme.Key - 2` (or `- AppTheme.Stroke`).
   The code reads the export of every local collection; a variable it leaves out, a library variable, a boolean and a binding whose value is
   not what the layer shows stay literals. The keys are derived from variable names (as the Tailwind export derives its names, because the
