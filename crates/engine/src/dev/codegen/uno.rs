@@ -259,6 +259,82 @@ pub(crate) fn uno_resource_keys(doc: &Document) -> std::collections::BTreeMap<St
     out
 }
 
+/// Whether a mode is called `word` (any case, around spaces): how the theme export finds Light and Dark.
+pub(crate) fn uno_mode_named(m: &figcraft_doc::Mode, word: &str) -> bool {
+    m.name.trim().eq_ignore_ascii_case(word)
+}
+
+/// The mode of each collection that is the Light theme and the one that is the Dark theme in the theme
+/// export, in the order of `colls`. A mode named light or dark (any case) is that theme; only when no
+/// collection has one, the first mode is Light and the second Dark. A collection with other mode names
+/// next to those is exported in its default mode (both themes); one with a single named mode uses it for
+/// both. Layer code reads the same pairs, so what it pins to a theme is what the export wrote.
+pub(crate) fn uno_mode_pairs<'a>(colls: &[&'a figcraft_doc::Collection]) -> Vec<(Option<&'a figcraft_doc::Mode>, Option<&'a figcraft_doc::Mode>)> {
+    let any_named = colls.iter().any(|c| c.modes.iter().any(|m| uno_mode_named(m, "light") || uno_mode_named(m, "dark")));
+    colls
+        .iter()
+        .map(|c| {
+            if !any_named {
+                return (c.modes.first(), c.modes.get(1).or(c.modes.first()));
+            }
+            match (c.modes.iter().find(|m| uno_mode_named(m, "light")), c.modes.iter().find(|m| uno_mode_named(m, "dark"))) {
+                (None, None) => (c.modes.first(), c.modes.first()),
+                (Some(x), None) | (None, Some(x)) => (Some(x), Some(x)),
+                (Some(a), Some(b)) => (Some(a), Some(b)),
+            }
+        })
+        .collect()
+}
+
+/// What the theme export wrote for a variable that layer code can refer to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum UnoExport {
+    /// A colour or string resource (looked up with `ThemeResource.Get<T>`).
+    Resource,
+    /// A number the same in both themes: `public const double`, which goes anywhere a number does.
+    Constant(f64),
+    /// A number that differs: a `ThemeResourceKey<double>` with its value in the Light and Dark themes.
+    PerMode(f64, f64),
+}
+
+/// The variables the theme export writes (the export of every local collection) with what it wrote,
+/// and the Light and Dark mode ids of each collection.
+#[derive(Debug, Default)]
+pub(crate) struct UnoExports {
+    pub(crate) vars: std::collections::BTreeMap<String, UnoExport>,
+    /// By collection id: the mode that is Light and the mode that is Dark.
+    pub(crate) themes: std::collections::BTreeMap<String, (String, String)>,
+}
+
+/// Which variables the export of all local collections writes, and how. A variable that does not
+/// resolve to its type's value, a number that is not finite and a boolean are not written, so layer
+/// code keeps their literals.
+pub(crate) fn uno_exports(doc: &Document) -> UnoExports {
+    use figcraft_doc::{VariableType, VariableValue};
+    let colls: Vec<&figcraft_doc::Collection> = crate::library::local_collections(doc).collect();
+    let pairs = uno_mode_pairs(&colls);
+    let mut out = UnoExports::default();
+    for (c, (l, d)) in colls.iter().zip(pairs).take(MAX_KEY_COLLECTIONS) {
+        let (Some(l), Some(d)) = (l, d) else { continue };
+        out.themes.insert(c.id.clone(), (l.id.clone(), d.id.clone()));
+        for v in doc.variables.variables.iter().filter(|v| v.collection == c.id) {
+            let at = |m: &figcraft_doc::Mode| doc.variables.resolve(&v.id, &std::collections::BTreeMap::from([(c.id.clone(), m.id.clone())]));
+            let (lv, dv) = (at(l), at(d));
+            let (lv, dv) = (lv.clone().or_else(|| dv.clone()), dv.or(lv));
+            let export = match (v.kind, lv, dv) {
+                (VariableType::Color, Some(VariableValue::Color(_)), Some(VariableValue::Color(_))) => UnoExport::Resource,
+                (VariableType::String, Some(VariableValue::String(_)), Some(VariableValue::String(_))) => UnoExport::Resource,
+                (VariableType::Number, Some(VariableValue::Number(a)), Some(VariableValue::Number(b))) if a.is_finite() && b.is_finite() => {
+                    if a == b { UnoExport::Constant(a) } else { UnoExport::PerMode(a, b) }
+                }
+                _ => continue,
+            };
+            out.vars.insert(v.id.clone(), export);
+        }
+    }
+    out
+}
+
 /// `Color.FromArgb(0xAA, 0xRR, 0xGG, 0xBB)` (needs `using Windows.UI;`).
 pub(crate) fn cs_color(c: Color) -> String {
     let [r, g, b, a] = c.to_rgba8();
@@ -377,6 +453,15 @@ enum Place {
     },
 }
 
+/// A single-number setter that a variable can be bound to.
+struct Setter {
+    call: &'static str,
+    fields: &'static [&'static str],
+    value: Option<f64>,
+    lookup: bool,
+    factor: f64,
+}
+
 /// What a tree walk keeps between layers.
 struct Gen<'a> {
     ctx: &'a Ctx<'a>,
@@ -389,6 +474,8 @@ struct Gen<'a> {
     /// The theme resource key of every variable of the file (what `variable.export {format: "uno"}`
     /// writes); a variable without one is written as the literal it stands for.
     keys: std::collections::BTreeMap<String, UnoKey>,
+    /// What the theme export writes for each of them, and which modes are Light and Dark.
+    exports: UnoExports,
     /// Whether any key was written, which the view's header says.
     theme_used: bool,
 }
@@ -397,7 +484,15 @@ struct Gen<'a> {
 pub(crate) fn uno(doc: &Document, id: NodeId) -> String {
     let Some(root) = doc.node(id) else { return String::new() };
     let ctx = Ctx::new(doc, id);
-    let mut g = Gen { ctx: &ctx, assets: BTreeSet::new(), free_frames: 0, names: BTreeSet::new(), keys: uno_resource_keys(doc), theme_used: false };
+    let mut g = Gen {
+        ctx: &ctx,
+        assets: BTreeSet::new(),
+        free_frames: 0,
+        names: BTreeSet::new(),
+        keys: uno_resource_keys(doc),
+        exports: uno_exports(doc),
+        theme_used: false,
+    };
     let mut top = match g.layer(root, 0, Place::Root) {
         Some(e) => e,
         None => {
@@ -457,7 +552,125 @@ impl Gen<'_> {
     /// The variable bound to the first of `fields` of `n` that has a theme resource key.
     fn key_of(&self, n: &Node, fields: &[&str]) -> Option<(&figcraft_doc::Variable, &UnoKey)> {
         let v = fields.iter().find_map(|f| crate::devinspect::bound_variable(self.ctx.doc, n, f))?;
+        // A variable the export leaves out (no value, a boolean) has no member to refer to.
+        self.exports.vars.contains_key(&v.id).then_some(())?;
         self.keys.get(&v.id).map(|k| (v, k))
+    }
+
+    /// How a number of `n` that may be bound to a variable (through the first of `fields` that is) is
+    /// written, for a property whose literal is `value`: the literal when nothing is bound, the variable
+    /// has no member, or its value is not what the layer shows (a stale binding, or a unit that is not
+    /// pixels); `AppTheme.<Key>` for a constant; for a number that differs by mode a `ThemeResource`
+    /// lookup where `lookup` (the property takes a plain number), else the literal with a note.
+    fn number(&mut self, e: &mut Element, n: &Node, fields: &[&str], value: f64, lookup: bool) -> String {
+        let literal = num(value);
+        let Some((v, key)) = self.key_of(n, fields) else { return literal };
+        let (id, name, key_name, kind) = (v.id.clone(), v.name.clone(), key.name.clone(), key.kind);
+        let Some(export) = self.exports.vars.get(&id).copied() else { return literal };
+        if kind != figcraft_doc::VariableType::Number || !value.is_finite() {
+            return literal;
+        }
+        let shows = |x: f64| (x - value).abs() <= 1e-4;
+        match export {
+            UnoExport::Constant(a) if shows(a) => {
+                self.theme_used = true;
+                format!("AppTheme.{}", key_name)
+            }
+            UnoExport::PerMode(a, b) if shows(a) || shows(b) => {
+                if lookup {
+                    self.theme_used = true;
+                    format!("ThemeResource.Get<double>(AppTheme.{})", key_name)
+                } else {
+                    e.note(&format!("variable {} differs by mode here", comment_name(&name)));
+                    literal
+                }
+            }
+            _ => literal,
+        }
+    }
+
+    /// The single-number setters of `n`'s own element `e` (a wrapper of the layer, never a child
+    /// layer) rewritten to the variables they are bound to: spacing, size, opacity, font size, stroke
+    /// weight and a uniform corner radius.
+    fn bind_numbers(&mut self, e: &mut Element, n: &Node) {
+        let font_size = n.kind.text().map(|t| t.style.font_size);
+        let uniform = n.corners.uniform().filter(|r| *r > 0.0);
+        let sided = n.stroke.sides.is_some();
+        // The call, the fields it can be bound through, its value, whether it takes a plain number (a
+        // lookup fits), and the factor a variable's value has (an opacity variable is a percentage).
+        let setter = |call, fields, value, lookup, factor| Setter { call, fields, value, lookup, factor };
+        let gap = n.layout.as_ref().map_or(0.0, |l| l.gap);
+        let cross = n.layout.as_ref().map_or(0.0, |l| l.cross_gap);
+        let table = [
+            setter("Spacing", &["gap"][..], Some(gap), true, 1.0),
+            setter("ColumnSpacing", &["gap"][..], Some(gap), true, 1.0),
+            setter("RowSpacing", &["crossGap"][..], Some(cross), true, 1.0),
+            setter("Width", &["width"][..], Some(n.width), true, 1.0),
+            setter("Height", &["height"][..], Some(n.height), true, 1.0),
+            setter("Opacity", &["opacity"][..], Some(f64::from(n.opacity)), true, 100.0),
+            setter("FontSize", &["fontSize"][..], font_size, true, 1.0),
+            setter("StrokeThickness", &["strokeWeight"][..], Some(n.stroke.weight), true, 1.0),
+            setter("BorderThickness", &["strokeWeight"][..], (!sided).then_some(n.stroke.weight), false, 1.0),
+            setter("CornerRadius", &["cornerRadius"][..], uniform, false, 1.0),
+        ];
+        for Setter { call, fields, value, lookup, factor } in table {
+            let Some(value) = value else { continue };
+            let literal = format!(".{call}({})", num(value));
+            let Some(i) = e.calls.iter().position(|c| *c == literal) else { continue };
+            let mut notes = Element::new("");
+            let shown = value * factor;
+            let expr = self.number(&mut notes, n, fields, shown, lookup);
+            if expr != num(shown)
+                && let Some(c) = e.calls.get_mut(i)
+            {
+                *c = if factor == 1.0 { format!(".{call}({expr})") } else { format!(".{call}({expr} / {})", num(factor)) };
+            }
+            // The note comes above the call it is about.
+            for (k, note) in notes.calls.into_iter().enumerate() {
+                e.calls.insert(i + k, note);
+            }
+        }
+    }
+
+    /// The padding of `n`'s layout as written: `base` is top, right, bottom, left, `weights` the border
+    /// each side is to give up (a border pushes content in by its thickness). A side bound to a
+    /// constant is `AppTheme.<Key>`, less the weight (`AppTheme.<Key> - 2`, or `- AppTheme.<Stroke>` when
+    /// that is a constant too); one bound to a number that differs by mode stays a literal with a note.
+    fn padding(&mut self, n: &Node, base: [f64; 4], weights: [f64; 4]) -> Padding {
+        let mut notes = Element::new("");
+        let mut out = Padding { v: [0.0; 4], x: Default::default(), notes: Vec::new() };
+        for i in 0..4 {
+            let (Some(b), Some(w), Some(fields)) = (base.get(i), weights.get(i), super::PADDING.get(i)) else { continue };
+            let pad = self.number(&mut notes, n, fields, *b, false);
+            let value = b - w;
+            let text = if *w == 0.0 {
+                pad
+            } else {
+                let stroke = if n.stroke.sides.is_none() { self.number(&mut Element::new(""), n, &["strokeWeight"], *w, false) } else { num(*w) };
+                if pad == num(*b) && stroke == num(*w) { num(value) } else { format!("{pad} - {stroke}") }
+            };
+            if let (Some(v), Some(x)) = (out.v.get_mut(i), out.x.get_mut(i)) {
+                *v = value;
+                *x = text;
+            }
+        }
+        for note in notes.calls {
+            if !out.notes.contains(&note) {
+                out.notes.push(note);
+            }
+        }
+        out
+    }
+
+    /// Every element `bind_numbers` applies to for `n`: `e` and the wrappers inside it that are not
+    /// layers of their own (a layer's element starts with its name comment).
+    fn bind_tree(&mut self, e: &mut Element, n: &Node) {
+        self.bind_numbers(e, n);
+        for k in &mut e.kids {
+            if k.lead.is_empty() {
+                self.bind_tree(k, n);
+            }
+        }
     }
 
     /// The brush for a colour bound to a variable: `ThemeResource.Get<Brush>(AppTheme.<Key>)`. `None`
@@ -508,6 +721,7 @@ impl Gen<'_> {
             _ => self.asset(n, at),
         };
         e.var = var;
+        self.bind_tree(&mut e, n);
         // The layer's name is the last comment line above the statement that creates its outermost
         // element, below any `// warning:` line: the plugin that post-processes the code pairs
         // elements with layers by it. `// not mapped:` lines sit in the chain, below the constructor.
@@ -612,10 +826,11 @@ impl Gen<'_> {
             // The layout inside keeps the whole padding; the border is drawn behind it.
             let mut border = Element::new("new Border()");
             self.paint_box(&mut border, n, false, at);
+            let whole = self.padding(n, [pt, pr, pb, pl], [0.0; 4]);
             if grid {
-                grid_calls(&mut line, l, &tracks, [pt, pr, pb, pl]);
+                grid_calls(&mut line, l, &tracks, &whole);
             } else {
-                layout_calls(&mut line, l, [pt, pr, pb, pl]);
+                layout_calls(&mut line, l, &whole);
             }
             outer = Element::new("new Grid()");
             place(&mut outer, n, at);
@@ -629,10 +844,11 @@ impl Gen<'_> {
             place(&mut outer, n, at);
             size(&mut outer);
             self.paint_box(&mut outer, n, false, at);
+            let less = self.padding(n, [pt, pr, pb, pl], weights);
             if grid {
-                grid_calls(&mut outer, l, &tracks, pad);
+                grid_calls(&mut outer, l, &tracks, &less);
             } else {
-                layout_calls(&mut outer, l, pad);
+                layout_calls(&mut outer, l, &less);
             }
             common(&mut outer, n);
         }
@@ -1048,7 +1264,7 @@ fn track_string(specs: &[figcraft_doc::GridTrack], count: usize) -> (String, boo
 /// The calls a `Grid` takes for its tracks, spacing and padding. In grid mode FigCraft's `gap` is
 /// the space between columns and `cross_gap` between rows (`layout_grid` reads them as `gx`, `gy`),
 /// and the main and cross alignment are the children's default alignment in their cell.
-fn grid_calls(e: &mut Element, l: &AutoLayout, t: &GridTracks, pad: [f64; 4]) {
+fn grid_calls(e: &mut Element, l: &AutoLayout, t: &GridTracks, pad: &Padding) {
     let (columns, rounded_c) = track_string(&l.column_tracks, t.columns);
     let (rows, rounded_r) = track_string(&l.row_tracks, t.rows);
     e.call(format!(".ColumnDefinitions({})", cs_literal(&columns)));
@@ -1071,14 +1287,25 @@ fn grid_calls(e: &mut Element, l: &AutoLayout, t: &GridTracks, pad: [f64; 4]) {
     }
 }
 
-/// `Padding` from top, right, bottom, left: one number when equal, nothing when zero.
-fn padding_call(e: &mut Element, pad: [f64; 4]) {
-    let [t, r, b, lf] = pad;
-    if pad.iter().any(|p| *p != 0.0) {
+/// The padding of a layout as it is written: the numbers (top, right, bottom, left), what is written
+/// for each (a literal or an expression of theme keys) and the notes for sides bound to a number
+/// that differs by mode.
+struct Padding {
+    v: [f64; 4],
+    x: [String; 4],
+    notes: Vec<String>,
+}
+
+/// `Padding` from top, right, bottom, left: one expression when all four are the same, nothing when
+/// zero.
+fn padding_call(e: &mut Element, pad: &Padding) {
+    if pad.v.iter().any(|p| *p != 0.0) {
+        e.calls.extend(pad.notes.iter().cloned());
+        let [t, r, b, lf] = &pad.x;
         if t == r && r == b && b == lf {
-            e.call(format!(".Padding({})", num(t)));
+            e.call(format!(".Padding({t})"));
         } else {
-            e.call(format!(".Padding({}, {}, {}, {})", num(lf), num(t), num(r), num(b)));
+            e.call(format!(".Padding({lf}, {t}, {r}, {b})"));
         }
     }
 }
@@ -1189,7 +1416,7 @@ pub(crate) fn path_data(path: &figcraft_geom::BezPath, rule: figcraft_render::Fi
 
 /// The calls an `AutoLayout` takes for its orientation, gap, padding (`pad` is top, right,
 /// bottom, left as written) and alignment.
-fn layout_calls(e: &mut Element, l: &AutoLayout, pad: [f64; 4]) {
+fn layout_calls(e: &mut Element, l: &AutoLayout, pad: &Padding) {
     e.call(format!(".Orientation(Orientation.{})", if l.mode == LayoutMode::Vertical { "Vertical" } else { "Horizontal" }));
     // The space distributions make the gaps themselves.
     if l.gap != 0.0 && !l.main_align.is_auto_gap() {

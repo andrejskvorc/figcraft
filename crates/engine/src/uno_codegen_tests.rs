@@ -1273,3 +1273,165 @@ fn a_variable_of_the_wrong_type_or_a_plain_string_for_a_family_stays_a_literal()
     assert!(chain(&code, "t").contains(&".FontFamily(\"Inter\")".to_string()), "{code}");
     assert!(!code.contains("ThemeResource"), "{code}");
 }
+
+/// A two-mode number collection: constants (`space/12`, `radius/6`, `line/2`, `size/200`, `text/14`) and
+/// numbers that differ by mode (`gap/wide`, `size/tall`).
+fn number_theme(s: &mut Session) {
+    collection(s, "Theme", &["Light", "Dark"]);
+    for (name, value) in [("space/12", 12), ("radius/6", 6), ("line/2", 2), ("size/200", 200), ("text/14", 14)] {
+        variable(s, "Theme", name, "number", json!(value));
+    }
+    variable(s, "Theme", "gap/wide", "number", json!(8));
+    ex(s, "variable.set", json!({"variable": "gap/wide", "mode": "Dark", "value": 16}));
+    variable(s, "Theme", "size/tall", "number", json!(100));
+    ex(s, "variable.set", json!({"variable": "size/tall", "mode": "Dark", "value": 120}));
+}
+
+#[test]
+fn bound_numbers_that_are_constants_are_keys_wherever_a_number_goes() {
+    let mut s = Session::new();
+    number_theme(&mut s);
+    let f = frame(&mut s, "Card", 200.0, 100.0);
+    set(
+        &mut s,
+        f,
+        json!({"layout": "vertical", "padding": 12, "gap": 12, "fill": "#ffffff", "stroke": "#cccccc", "strokeWeight": 2, "strokesIncluded": false, "cornerRadius": 6}),
+    );
+    bind(&mut s, f, "width", "size/200");
+    bind(&mut s, f, "paddingTop", "space/12");
+    bind(&mut s, f, "paddingLeft", "space/12");
+    bind(&mut s, f, "gap", "space/12");
+    bind(&mut s, f, "cornerRadius", "radius/6");
+    bind(&mut s, f, "strokeWeight", "line/2");
+    let t = idv(&ex(&mut s, "text.create", json!({"text": "Hi", "x": 0, "y": 0, "parent": f, "props": {"name": "Label", "fontSize": 14}})));
+    bind(&mut s, t, "fontSize", "text/14");
+    let code = uno(&mut s, f);
+    let card = chain(&code, "card");
+    for want in [
+        ".Width(AppTheme.Size200)",
+        ".Spacing(AppTheme.Space12)",
+        ".CornerRadius(AppTheme.Radius6)",
+        ".BorderThickness(AppTheme.Line2)",
+        // A border pushes content in: every side gives up the stroke weight, which follows its variable.
+        ".Padding(AppTheme.Space12 - AppTheme.Line2, AppTheme.Space12 - AppTheme.Line2, 12 - AppTheme.Line2, 12 - AppTheme.Line2)",
+    ] {
+        assert!(card.contains(&want.to_string()), "{want}\n{code}");
+    }
+    // The height was not bound: its literal stays.
+    assert!(card.contains(&".Height(100)".to_string()), "{code}");
+    assert!(chain(&code, "label").contains(&".FontSize(AppTheme.Text14)".to_string()), "{code}");
+    assert!(code.contains("// theme: AppTheme comes from variable.export {format: \"uno\"}\n"), "{code}");
+    // The members exist in the export of the same document, as constants.
+    let theme = ex(&mut s, "variable.export", json!({"format": "uno"}))["text"].as_str().unwrap_or_default().to_string();
+    for key in ["Size200", "Space12", "Radius6", "Line2", "Text14"] {
+        assert!(theme.contains(&format!("public const double {key} = ")), "{key}\n{theme}");
+    }
+}
+
+#[test]
+fn a_padding_that_is_bound_but_has_no_stroke_to_give_up_is_the_key_alone() {
+    let mut s = Session::new();
+    number_theme(&mut s);
+    let f = frame(&mut s, "Box", 100.0, 100.0);
+    set(&mut s, f, json!({"layout": "horizontal", "padding": 12, "gap": 0, "fills": []}));
+    bind(&mut s, f, "padding", "space/12");
+    let code = uno(&mut s, f);
+    assert!(chain(&code, "box").contains(&".Padding(AppTheme.Space12)".to_string()), "{code}");
+}
+
+#[test]
+fn a_bound_padding_less_a_stroke_wider_than_it_is_keeps_whole_padding_behind_the_border() {
+    let mut s = Session::new();
+    number_theme(&mut s);
+    let f = frame(&mut s, "Chip", 100.0, 40.0);
+    set(
+        &mut s,
+        f,
+        json!({"layout": "horizontal", "padding": 2, "gap": 0, "fills": [], "stroke": "#000000", "strokeWeight": 4, "strokesIncluded": false}),
+    );
+    variable(&mut s, "Theme", "space/2", "number", json!(2));
+    bind(&mut s, f, "padding", "space/2");
+    let code = uno(&mut s, f);
+    // Negative once the border is taken off: the border sits behind a layout that keeps the whole padding.
+    assert!(chain(&code, "chipLayout").contains(&".Padding(AppTheme.Space2)".to_string()), "{code}");
+}
+
+#[test]
+fn a_number_that_differs_by_mode_is_looked_up_where_one_number_fits_and_a_literal_with_a_note_elsewhere() {
+    let mut s = Session::new();
+    number_theme(&mut s);
+    let f = frame(&mut s, "Panel", 200.0, 100.0);
+    set(&mut s, f, json!({"layout": "vertical", "padding": 8, "gap": 8, "fills": [], "cornerRadius": 8}));
+    bind(&mut s, f, "gap", "gap/wide");
+    bind(&mut s, f, "padding", "gap/wide");
+    bind(&mut s, f, "cornerRadius", "gap/wide");
+    bind(&mut s, f, "height", "size/tall");
+    let code = uno(&mut s, f);
+    let c = chain(&code, "panel");
+    assert!(c.contains(&".Spacing(ThemeResource.Get<double>(AppTheme.GapWide))".to_string()), "{code}");
+    assert!(c.contains(&".Height(ThemeResource.Get<double>(AppTheme.SizeTall))".to_string()), "{code}");
+    // Padding and corner radius take more than one number: the literal, and the note once per property.
+    assert!(c.contains(&".Padding(8)".to_string()), "{code}");
+    assert!(c.contains(&".CornerRadius(8)".to_string()), "{code}");
+    assert_eq!(c.iter().filter(|l| *l == "// not mapped: variable gap/wide differs by mode here").count(), 2, "{code}");
+    let theme = ex(&mut s, "variable.export", json!({"format": "uno"}))["text"].as_str().unwrap_or_default().to_string();
+    assert!(theme.contains("ThemeResourceKey<double> GapWide = new(\"GapWide\")"), "{theme}");
+}
+
+#[test]
+fn a_number_that_is_not_what_the_layer_shows_or_has_no_key_stays_a_literal() {
+    let mut s = Session::new();
+    number_theme(&mut s);
+    // The variable says 12, the layer shows 20: the layer's own value is what the picture has.
+    let f = frame(&mut s, "Stale", 100.0, 100.0);
+    set(&mut s, f, json!({"layout": "horizontal", "padding": 0, "gap": 20, "fills": []}));
+    bind(&mut s, f, "gap", "space/12");
+    set(&mut s, f, json!({"gap": 20}));
+    let code = uno(&mut s, f);
+    assert!(!code.contains("AppTheme"), "{code}");
+}
+
+#[test]
+fn opacity_stroke_thickness_and_grid_spacing_follow_their_variables() {
+    let mut s = Session::new();
+    collection(&mut s, "Theme", &["Light", "Dark"]);
+    variable(&mut s, "Theme", "fade", "number", json!(50));
+    variable(&mut s, "Theme", "ring", "number", json!(3));
+    variable(&mut s, "Theme", "gutter", "number", json!(10));
+    variable(&mut s, "Theme", "row gap", "number", json!(4));
+    ex(&mut s, "variable.set", json!({"variable": "row gap", "mode": "Dark", "value": 6}));
+    let g = grid(&mut s, json!({"columnTracks": ["1fr", "1fr"], "rowTracks": ["auto"], "gap": 10, "crossGap": 4}));
+    bind(&mut s, g, "gap", "gutter");
+    bind(&mut s, g, "crossGap", "row gap");
+    let dot = idv(&ex(
+        &mut s,
+        "shape.ellipse",
+        json!({"x": 0, "y": 0, "width": 10, "height": 10, "parent": g, "props": {"name": "Dot", "fill": "#ffffff", "stroke": "#000000", "strokeWeight": 3, "opacity": 0.5}}),
+    ));
+    bind(&mut s, dot, "strokeWeight", "ring");
+    bind(&mut s, dot, "opacity", "fade");
+    let code = uno(&mut s, g);
+    let table = chain(&code, "table");
+    assert!(table.contains(&".ColumnSpacing(AppTheme.Gutter)".to_string()), "{code}");
+    assert!(table.contains(&".RowSpacing(ThemeResource.Get<double>(AppTheme.RowGap))".to_string()), "{code}");
+    let dot = chain(&code, "dot");
+    assert!(dot.contains(&".StrokeThickness(AppTheme.Ring)".to_string()), "{code}");
+    // An opacity variable is a percentage.
+    assert!(dot.contains(&".Opacity(AppTheme.Fade / 100)".to_string()), "{code}");
+}
+
+#[test]
+fn a_padding_bound_to_a_number_that_differs_by_mode_is_a_literal_less_the_stroke_with_one_note() {
+    let mut s = Session::new();
+    number_theme(&mut s);
+    let f = frame(&mut s, "Pill", 100.0, 40.0);
+    set(
+        &mut s,
+        f,
+        json!({"layout": "horizontal", "padding": 8, "gap": 0, "fills": [], "stroke": "#000000", "strokeWeight": 1, "strokesIncluded": false}),
+    );
+    bind(&mut s, f, "padding", "gap/wide");
+    let c = chain(&uno(&mut s, f), "pill");
+    assert!(c.contains(&".Padding(7)".to_string()), "{c:?}");
+    assert_eq!(c.iter().filter(|l| l.starts_with("// not mapped: variable gap/wide")).count(), 1, "{c:?}");
+}

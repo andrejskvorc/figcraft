@@ -1803,7 +1803,18 @@ permissions: without it nothing is downloaded); `plugin.directory.publish {path 
   comment to export it. Image fills are an `ImageBrush` on `<name>.png` (names lowercase ASCII, unique in the snippet; the files are not
   written). Shadows, blurs, blend modes, masks, gradients beyond the first stop, pattern fills, stroke alignment other than inside,
   corner smoothing and arcs are `// not mapped: …` comments. Components and instances are written as the frames they are;
-  `inspect.componentCode` and code connect do not take `uno` yet.
+  `inspect.componentCode` and code connect do not take `uno` yet. Properties bound to a variable are written as the theme resource that
+  `variable.export {format: "uno"}` writes for it (the key is the variable's PascalCase name, `Brush` after a colour; the view's header
+  says `// theme: AppTheme comes from variable.export {format: "uno"}`): a colour as `ThemeResource.Get<Brush>(AppTheme.Key)` for
+  `Background`, `BorderBrush`, `Fill`, `Stroke` and `Foreground` (a paint with its own opacity stays a literal with a note), a font family
+  (a string variable scoped to font family) as `ThemeResource.Get<FontFamily>(AppTheme.Key)`, a number the same in both themes as the
+  constant `AppTheme.Key` wherever the number goes (`Spacing`, `ColumnSpacing`, `RowSpacing`, each argument of `Padding`, `CornerRadius`,
+  `BorderThickness`, `StrokeThickness`, `Width`, `Height`, `FontSize`; an opacity variable is a percentage: `AppTheme.Key / 100`), and a
+  number that differs by theme as `ThemeResource.Get<double>(AppTheme.Key)` where the property takes one number, elsewhere as the literal with
+  `// not mapped: variable <name> differs by mode here`. A padding less the stroke weight is `AppTheme.Key - 2` (or `- AppTheme.Stroke`).
+  The code reads the export of every local collection; a variable it leaves out, a library variable, a boolean and a binding whose value is
+  not what the layer shows stay literals. The keys are derived from variable names (as the Tailwind export derives its names, because the
+  matching export writes them), not from a code syntax; text content stays a literal.
 - **Code connect:** link a component (a variant links its set) to the code component it is built
   as, per language (`react`, `leptos`, `vue`, `swiftui`, `compose`, `arkui`, `flutter`): `codeConnect.set {id?, language?, importPath?,
   name?, template?}` (undoable; fields left out keep their value; the defaults are the generated

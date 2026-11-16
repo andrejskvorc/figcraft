@@ -139,36 +139,25 @@ fn xml_summary(text: &str) -> String {
 fn uno_theme(doc: &Document, colls: &[&Collection]) -> String {
     let vars = &doc.variables;
     let keys = uno_resource_keys(doc);
-    let named = |m: &Mode, word: &str| m.name.trim().eq_ignore_ascii_case(word);
+    let named = crate::codegen::uno_mode_named;
     let any_named = colls.iter().any(|c| c.modes.iter().any(|m| named(m, "light") || named(m, "dark")));
+    let pairs = crate::codegen::uno_mode_pairs(colls);
     let mut notes: Vec<String> = Vec::new();
     if colls.len() > UNO_MAX_COLLECTIONS {
         notes.push(format!("only the first {UNO_MAX_COLLECTIONS} of {} collections are exported", colls.len()));
     }
     // Declarations of the class, and the lines of the main, light and dark dictionaries.
     let (mut decls, mut main, mut light, mut dark): (Vec<String>, Vec<String>, Vec<String>, Vec<String>) = Default::default();
-    for c in colls.iter().take(UNO_MAX_COLLECTIONS) {
-        let (l, d): (Option<&Mode>, Option<&Mode>) = if any_named {
-            match (c.modes.iter().find(|m| named(m, "light")), c.modes.iter().find(|m| named(m, "dark"))) {
-                (None, None) => {
-                    let m = c.modes.first();
-                    if c.modes.len() > 1 {
-                        let others: Vec<&str> = c.modes.iter().skip(1).map(|m| m.name.as_str()).collect();
-                        notes.push(format!(
-                            "{} has no light or dark mode: its default mode {} is exported; left out: {}",
-                            xml_summary(&c.name),
-                            m.map_or("", |m| m.name.as_str()),
-                            xml_summary(&others.join(", "))
-                        ));
-                    }
-                    (m, m)
-                }
-                (Some(x), None) | (None, Some(x)) => (Some(x), Some(x)),
-                (Some(a), Some(b)) => (Some(a), Some(b)),
-            }
-        } else {
-            (c.modes.first(), c.modes.get(1).or(c.modes.first()))
-        };
+    for (c, (l, d)) in colls.iter().zip(pairs).take(UNO_MAX_COLLECTIONS) {
+        if any_named && c.modes.len() > 1 && !c.modes.iter().any(|m| named(m, "light") || named(m, "dark")) {
+            let others: Vec<&str> = c.modes.iter().skip(1).map(|m| m.name.as_str()).collect();
+            notes.push(format!(
+                "{} has no light or dark mode: its default mode {} is exported; left out: {}",
+                xml_summary(&c.name),
+                l.map_or("", |m| m.name.as_str()),
+                xml_summary(&others.join(", "))
+            ));
+        }
         if let (Some(l), Some(d)) = (l, d) {
             let left: Vec<&str> = c.modes.iter().filter(|m| m.id != l.id && m.id != d.id).map(|m| m.name.as_str()).collect();
             // A collection that is not a theme was noted above with its other modes.
