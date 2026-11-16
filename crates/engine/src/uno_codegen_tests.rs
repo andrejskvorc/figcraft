@@ -1435,3 +1435,68 @@ fn a_padding_bound_to_a_number_that_differs_by_mode_is_a_literal_less_the_stroke
     assert!(c.contains(&".Padding(7)".to_string()), "{c:?}");
     assert_eq!(c.iter().filter(|l| l.starts_with("// not mapped: variable gap/wide")).count(), 1, "{c:?}");
 }
+
+/// A screen with a light frame and a dark frame (the layout of a design with both themes), each with a
+/// bound background and a bound label.
+fn two_themes(s: &mut Session) -> (NodeId, NodeId, NodeId) {
+    collection(s, "Theme", &["Light", "Dark", "Sepia"]);
+    variable(s, "Theme", "color/surface", "color", json!("#ffffff"));
+    ex(s, "variable.set", json!({"variable": "color/surface", "mode": "Dark", "value": "#111111"}));
+    ex(s, "variable.set", json!({"variable": "color/surface", "mode": "Sepia", "value": "#f4ecd8"}));
+    let screen = frame(s, "Screen", 400.0, 200.0);
+    set(s, screen, json!({"layout": "horizontal", "padding": 0, "gap": 0, "sizingH": "fixed", "sizingV": "fixed"}));
+    let mut panes = Vec::new();
+    for name in ["Day", "Night"] {
+        let pane = idv(&ex(s, "frame.create", json!({"x": 0, "y": 0, "width": 100, "height": 100, "parent": screen, "name": name})));
+        set(s, pane, json!({"layout": "vertical", "padding": 4, "gap": 0, "sizingH": "fixed", "sizingV": "fixed"}));
+        bind(s, pane, "fill", "color/surface");
+        let label = idv(&ex(s, "text.create", json!({"text": "Hi", "x": 0, "y": 0, "parent": pane, "props": {"name": format!("{name} label")}})));
+        bind(s, label, "fill", "color/surface");
+        panes.push(pane);
+    }
+    (screen, panes[0], panes[1])
+}
+
+#[test]
+fn a_layer_pinned_to_the_dark_mode_asks_for_the_dark_theme_and_its_children_inherit_it() {
+    let mut s = Session::new();
+    let (screen, _day, night) = two_themes(&mut s);
+    ex(&mut s, "variable.setMode", json!({"ids": [night], "collection": "Theme", "mode": "Dark"}));
+    let code = uno(&mut s, screen);
+    let want = ".RequestedTheme(ElementTheme.Dark)".to_string();
+    assert!(chain(&code, "night").contains(&want), "{code}");
+    assert_eq!(code.matches("RequestedTheme").count(), 1, "{code}");
+    // Keys stay keys inside the dark frame: the theme dictionary answers for it.
+    assert!(chain(&code, "night").contains(&".Background(ThemeResource.Get<Brush>(AppTheme.ColorSurfaceBrush))".to_string()), "{code}");
+    assert!(chain(&code, "nightLabel").iter().any(|l| l.starts_with(".Foreground(ThemeResource.Get<Brush>(")), "{code}");
+    // Pinned to Light, the root asks for the light theme; the dark frame inside asks again.
+    ex(&mut s, "variable.setMode", json!({"ids": [screen], "collection": "Theme", "mode": "Light"}));
+    let code = uno(&mut s, screen);
+    assert!(chain(&code, "screen").contains(&".RequestedTheme(ElementTheme.Light)".to_string()), "{code}");
+    assert!(chain(&code, "night").contains(&want), "{code}");
+    assert!(!chain(&code, "day").iter().any(|l| l.starts_with(".RequestedTheme")), "{code}");
+}
+
+#[test]
+fn a_layer_inside_a_pinned_frame_is_pinned_when_it_is_the_exported_root() {
+    let mut s = Session::new();
+    let (screen, _day, night) = two_themes(&mut s);
+    ex(&mut s, "variable.setMode", json!({"ids": [screen], "collection": "Theme", "mode": "Dark"}));
+    // Exporting the child alone: the frame above it is not in the code, so the child asks for the theme.
+    let code = uno(&mut s, night);
+    assert!(chain(&code, "night").contains(&".RequestedTheme(ElementTheme.Dark)".to_string()), "{code}");
+}
+
+#[test]
+fn a_layer_pinned_to_a_mode_the_export_does_not_write_has_literals_and_a_note() {
+    let mut s = Session::new();
+    let (screen, day, _night) = two_themes(&mut s);
+    ex(&mut s, "variable.setMode", json!({"ids": [day], "collection": "Theme", "mode": "Sepia"}));
+    let code = uno(&mut s, screen);
+    let c = chain(&code, "day");
+    assert!(c.iter().any(|l| l.starts_with(".Background(Color.FromArgb(")), "{code}");
+    assert!(c.contains(&"// not mapped: Theme on mode Sepia is not exported: its variables are written as literals".to_string()), "{code}");
+    assert!(!code.contains("RequestedTheme") && !chain(&code, "dayLabel").iter().any(|l| l.contains("ThemeResource")), "{code}");
+    // The frame beside it still reads the theme.
+    assert!(chain(&code, "night").iter().any(|l| l.starts_with(".Background(ThemeResource.Get<Brush>(")), "{code}");
+}

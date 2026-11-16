@@ -554,7 +554,55 @@ impl Gen<'_> {
         let v = fields.iter().find_map(|f| crate::devinspect::bound_variable(self.ctx.doc, n, f))?;
         // A variable the export leaves out (no value, a boolean) has no member to refer to.
         self.exports.vars.contains_key(&v.id).then_some(())?;
+        // A layer on a mode the export does not write (a third mode) shows values the theme does not hold.
+        if self.mode_not_exported(n.id).iter().any(|(c, _)| *c == v.collection) {
+            return None;
+        }
         self.keys.get(&v.id).map(|k| (v, k))
+    }
+
+    /// The collections whose mode on layer `id` (its own pin, or its ancestors') is neither the Light nor
+    /// the Dark mode of the export, with that mode's id.
+    fn mode_not_exported(&self, id: NodeId) -> Vec<(String, String)> {
+        let modes = self.ctx.doc.modes_for(id);
+        self.exports.themes.iter().filter_map(|(c, (l, d))| modes.get(c).filter(|m| *m != l && *m != d).map(|m| (c.clone(), m.clone()))).collect()
+    }
+
+    /// The theme layer `id` is on because of the modes it is pinned to (its own, or its ancestors'): `Some(true)`
+    /// for Dark and `Some(false)` for Light, in the first collection (by id) that the export maps to the two
+    /// themes and that is pinned to one of them. `None` where the app's theme decides.
+    fn pinned_theme(&self, id: NodeId) -> Option<bool> {
+        let modes = self.ctx.doc.modes_for(id);
+        self.exports.themes.iter().find_map(|(c, (l, d))| {
+            let m = modes.get(c)?;
+            if l == d {
+                None
+            } else if m == d {
+                Some(true)
+            } else if m == l {
+                Some(false)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// `.RequestedTheme(…)` on the outermost element of a layer that is pinned to a different theme than
+    /// the one it sits in (the app's theme for the root), and a note when it is pinned to a mode the export
+    /// does not write, whose variables are therefore literals.
+    fn pin_theme(&mut self, e: &mut Element, n: &Node) {
+        let parent = if n.id == self.ctx.root { None } else { self.ctx.doc.ancestors(n.id).first().and_then(|p| self.pinned_theme(*p)) };
+        if let Some(dark) = self.pinned_theme(n.id).filter(|t| Some(*t) != parent) {
+            e.call(format!(".RequestedTheme(ElementTheme.{})", if dark { "Dark" } else { "Light" }));
+        }
+        for (c, m) in &n.var_modes {
+            if self.mode_not_exported(n.id).iter().any(|(oc, om)| oc == c && om == m) {
+                let coll = self.ctx.doc.variables.collection(c);
+                let name = coll.map_or("a collection", |c| c.name.as_str());
+                let mode = coll.and_then(|c| c.modes.iter().find(|x| x.id == *m)).map_or("a mode", |x| x.name.as_str());
+                e.note(&format!("{} on mode {} is not exported: its variables are written as literals", comment_name(name), comment_name(mode)));
+            }
+        }
     }
 
     /// How a number of `n` that may be bound to a variable (through the first of `fields` that is) is
@@ -722,6 +770,7 @@ impl Gen<'_> {
         };
         e.var = var;
         self.bind_tree(&mut e, n);
+        self.pin_theme(&mut e, n);
         // The layer's name is the last comment line above the statement that creates its outermost
         // element, below any `// warning:` line: the plugin that post-processes the code pairs
         // elements with layers by it. `// not mapped:` lines sit in the chain, below the constructor.

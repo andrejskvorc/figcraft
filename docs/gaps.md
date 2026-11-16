@@ -484,7 +484,7 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   `Children.Add` / `Child =`. Still to do: wrapping layouts (`FlexPanel`, needs Uno Toolkit 10), variables as theme resources,
   components, variants and code connect for Uno, a folder export that writes the asset files.
 - **Landed (2026-11-15):** `variable.export {format: uno}` and Variables ▸ Export ▸ C# theme resources for Uno…: a `ThemeResourceKey` per
-  variable and `CreateDictionary()` with Light and Dark theme dictionaries. Layer code reads the keys: bound colours, font families and numbers are `AppTheme` lookups or constants (see the dev-mode parity page). Still to do: pinned modes (`RequestedTheme`), components.
+  variable and `CreateDictionary()` with Light and Dark theme dictionaries. Layer code reads the keys: bound colours, font families and numbers are `AppTheme` lookups or constants (see the dev-mode parity page). Pinned modes are `RequestedTheme`. Still to do: components.
 - **Landed (2026-10-30):** `figcraft-cli connect publish <file.figcraft> [--mappings
   figcraft.connect.json] [--dry-run]` publishes a code repository's mappings to a design file, so
   code owners keep them with the code and publish them from CI ([cli.md](cli.md)).

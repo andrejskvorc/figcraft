@@ -1814,7 +1814,10 @@ permissions: without it nothing is downloaded); `plugin.directory.publish {path 
   `// not mapped: variable <name> differs by mode here`. A padding less the stroke weight is `AppTheme.Key - 2` (or `- AppTheme.Stroke`).
   The code reads the export of every local collection; a variable it leaves out, a library variable, a boolean and a binding whose value is
   not what the layer shows stay literals. The keys are derived from variable names (as the Tailwind export derives its names, because the
-  matching export writes them), not from a code syntax; text content stays a literal.
+  matching export writes them), not from a code syntax; text content stays a literal. A layer pinned to the Dark (or Light) mode of a collection the theme export maps to the two themes gets
+  `.RequestedTheme(ElementTheme.Dark)` (or `Light`) on its outermost element when its parent is on another theme (the root: when it is
+  pinned at all, itself or through the frames above it), and its children inherit it; a layer on a mode the export does not write (a third
+  mode) keeps literals for that collection's variables, with a note.
 - **Code connect:** link a component (a variant links its set) to the code component it is built
   as, per language (`react`, `leptos`, `vue`, `swiftui`, `compose`, `arkui`, `flutter`): `codeConnect.set {id?, language?, importPath?,
   name?, template?}` (undoable; fields left out keep their value; the defaults are the generated
